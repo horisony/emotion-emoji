@@ -1,6 +1,9 @@
 {
   "name": "互动可爱表情包",
   "description": "一个可以通过标签切换不同情绪并带有丝滑变形动画的可爱表情互动网页。",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
   "majorCapabilities": []
 }
