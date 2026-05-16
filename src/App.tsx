@@ -1027,7 +1027,7 @@ export default function App() {
                     transition={{ type: "spring", stiffness: 400, damping: 30 }}
                   />
                 )}
-                <span className="relative z-10 flex items-center gap-2">
+                <span className="relative z-10 flex items-center gap-1">
                   {tab.icon}
                   {tab.label}
                 </span>
@@ -1053,11 +1053,11 @@ export default function App() {
           >
             {/* Container for the bouncy whole-body movements */}
             <motion.div
-          variants={faceContainerVariants}
-          initial="neutral"
-          animate={emotion}
-          className="relative w-80 h-80 flex justify-center"
-        >
+              variants={faceContainerVariants}
+              initial="neutral"
+              animate={emotion}
+              className="relative w-80 h-80 flex justify-center"
+            >
           {/* Glowing Spirit Face Base (Blurred for flowing edges) */}
           <motion.div
             animate={{
@@ -1326,7 +1326,19 @@ export default function App() {
               <Laptop size={130} strokeWidth={1.5} fill="#94a3b8" />
             </motion.div>
           </div>
-        </motion.div>
+            </motion.div>
+          </div>
+
+          <AnimatePresence mode="wait">
+            {wordFlashcard ? (
+              <WordFlashCard
+                key={`${wordFlashcard.primary_text}-${wordFlashcard.secondary_text}`}
+                {...wordFlashcard}
+                onDismiss={() => setWordFlashcard(null)}
+              />
+            ) : null}
+          </AnimatePresence>
+        </div>
       </div>
 
       {/* Video Preview */}
