@@ -1,7 +1,7 @@
 export interface WordFlashcardPayload {
-  /** 目标语言大字：单词或短语 */
+  /** 大字：要学的外语单词或短语（学英文时为英文） */
   primary_text: string;
-  /** 辅助语言小字：翻译 / 释义 */
+  /** 小字：极简中文释义 / 翻译（勿整句） */
   secondary_text: string;
   /** BCP-47，如 en、ja，用于 lang 与维基子域 */
   primary_lang?: string;

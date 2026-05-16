@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { BookOpen, ImageOff, X } from "lucide-react";
+import { BookOpen, ImageOff, Volume2, X } from "lucide-react";
 import type { WordFlashcardPayload } from "./types";
 
 const WIKI_SUBDOMAIN: Record<string, string> = {
@@ -44,6 +44,10 @@ async function fetchWikipediaThumb(
 
 export interface WordFlashCardProps extends WordFlashcardPayload {
   onDismiss?: () => void;
+  /** 点击喇叭：让 AI 再朗读目标语与释义两轮 */
+  onReadAloud?: () => void;
+  /** 未连麦 / 未就绪时禁用喇叭 */
+  readAloudDisabled?: boolean;
 }
 
 export function WordFlashCard({
@@ -54,6 +58,8 @@ export function WordFlashCard({
   image_search_query,
   phonetic,
   onDismiss,
+  onReadAloud,
+  readAloudDisabled,
 }: WordFlashCardProps) {
   const [thumb, setThumb] = useState<string | null>(null);
   const [thumbFailed, setThumbFailed] = useState(false);
@@ -92,22 +98,38 @@ export function WordFlashCard({
       animate={{ opacity: 1, x: 0, scale: 1 }}
       exit={{ opacity: 0, x: 16, scale: 0.96 }}
       transition={{ type: "spring", stiffness: 320, damping: 28 }}
-      className="relative w-full max-w-md shrink-0"
+      className="relative z-30 w-full max-w-md shrink-0"
     >
       <div
         className="relative overflow-hidden rounded-3xl border border-white/15 bg-gradient-to-br from-slate-900/95 via-indigo-950/90 to-slate-950/95 shadow-[0_24px_80px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl"
         style={{ minHeight: 360 }}
       >
-        {onDismiss && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="absolute right-3 top-3 z-20 flex h-9 w-9 items-center justify-center rounded-full bg-black/35 text-white/90 transition hover:bg-black/55 hover:text-white"
-            title="收起闪卡"
-            aria-label="收起闪卡"
-          >
-            <X size={18} />
-          </button>
+        {(onReadAloud || onDismiss) && (
+        <div className="absolute right-3 top-3 z-20 flex items-center gap-1.5">
+          {onReadAloud && (
+            <button
+              type="button"
+              disabled={readAloudDisabled}
+              onClick={() => onReadAloud()}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-black/35 text-white/90 transition hover:bg-black/55 hover:text-white disabled:pointer-events-none disabled:opacity-35"
+              title="再听两遍"
+              aria-label="再听两遍朗读"
+            >
+              <Volume2 size={18} strokeWidth={2} />
+            </button>
+          )}
+          {onDismiss && (
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-black/35 text-white/90 transition hover:bg-black/55 hover:text-white"
+              title="收起闪卡"
+              aria-label="收起闪卡"
+            >
+              <X size={18} />
+            </button>
+          )}
+        </div>
         )}
 
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_20%_0%,rgba(129,140,248,0.22),transparent_55%),radial-gradient(ellipse_at_100%_100%,rgba(52,211,153,0.12),transparent_50%)] pointer-events-none" />

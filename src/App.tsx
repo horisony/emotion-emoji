@@ -1,9 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { extractToolCalls } from './features/realtime/toolCalls';
+import { extractToolCalls, extractToolCallsWide } from './features/realtime/toolCalls';
 import { WordFlashCard } from './features/flashcard/WordFlashCard';
 import type { WordFlashcardPayload } from './features/flashcard/types';
-import { parseWordFlashcardPayload } from './features/flashcard/parsePayload';
+import { FLASHCARD_ORAL_PACING_RULE_ZH } from './features/flashcard/oralPacing';
+import { argsJsonLooksStreamIncomplete, parseWordFlashcardPayload } from './features/flashcard/parsePayload';
+import { heuristicFlashcardFromUserChinese } from './features/flashcard/heuristicFromSpeech';
+import { scrubTranscriptAndPullFlashcard } from './features/flashcard/transcriptDisplay';
+import {
+  flashcardUiContextKey,
+  requestFlashcardReadAgainTwice,
+  requestFlashcardReadAloud,
+  sendFlashcardUiToRealtimeConversation,
+} from './features/flashcard/uiSync';
 import { Smile, Frown, Meh, Angry, AlertCircle, Heart, Laptop, Mic, MicOff, MessageCircle, Camera, CameraOff, Eye } from 'lucide-react';
 
 type Emotion = 'neutral' | 'replying' | 'happy' | 'sad' | 'angry' | 'surprised' | 'shy' | 'working' | 'listening' | 'thinking';
@@ -231,6 +240,21 @@ function visionLog(step: string, detail?: unknown) {
   }
 }
 
+/** 闪卡 / Realtime 工具链调试：`localStorage.setItem("FLASHCARD_DEBUG","1")` 或 URL `?debug=flashcard` 后控制台过滤 `[flashcard]` */
+function flashcardLog(step: string, detail?: unknown) {
+  if (typeof window === "undefined") return;
+  const enabled =
+    import.meta.env.DEV ||
+    window.localStorage?.getItem("FLASHCARD_DEBUG") === "1" ||
+    window.localStorage?.getItem("VISION_DEBUG") === "1";
+  if (!enabled) return;
+  if (detail !== undefined) {
+    console.log("[flashcard]", step, detail);
+  } else {
+    console.log("[flashcard]", step);
+  }
+}
+
 /** 两次「手动拍一张」之间的最小间隔；语音触发的识图（asr）不防抖，避免用户连问「能看见我吗」时被跳过 */
 const VISION_DEBOUNCE_MS = 12000;
 
@@ -270,6 +294,23 @@ function userSpeechRequestsVision(text: string): boolean {
     return true;
   }
   visionLog("asr.trigger: no match", { text: t });
+  return false;
+}
+
+/** 用户是否在要「单词闪卡」——尽量宽松：话里提到闪卡/闪卡游戏/展示某卡等即触发（排除明确拒绝） */
+function userSpeechRequestsFlashcard(text: string): boolean {
+  const t = normalizeVisionSpeechText(text);
+  if (t.length < 2) return false;
+  if (/不要闪卡|别闪卡|不用闪卡|不(要|玩)闪卡|关掉闪卡|取消闪卡|别给我闪卡/.test(t)) return false;
+
+  if (/闪卡/.test(t)) return true;
+  if (/闪\s*卡/.test(t)) return true;
+  if (/闪卡游戏|闪卡\s*游|单词闪卡|生词卡|背词卡/.test(t)) return true;
+  if (/玩.{0,14}(闪卡|单词卡|生词卡|词卡)|来.{0,6}(玩|一局).{0,8}闪/.test(t)) return true;
+  if (/(展示|出示|亮出|打开|看).{0,18}(闪卡|单词卡|生词卡|词卡)/.test(t)) return true;
+  if (/(给我们|给咱们|帮我|替我).{0,12}(展示|看|玩|来).{0,14}(闪卡|单词卡|卡)/.test(t)) return true;
+  if (/.{0,12}的闪卡/.test(t)) return true;
+  if (/.{0,12}闪卡.{0,10}(展示|一下|看看|玩玩)/.test(t)) return true;
   return false;
 }
 
@@ -352,10 +393,24 @@ export default function App() {
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [wordFlashcard, setWordFlashcard] = useState<WordFlashcardPayload | null>(null);
+  const wordFlashcardRef = React.useRef<WordFlashcardPayload | null>(null);
+  wordFlashcardRef.current = wordFlashcard;
+  /** 已向 Realtime 会话注入过的闪卡 UI 状态键，避免重复 item */
+  const lastFlashcardUiSyncKeyRef = React.useRef<string | null>(null);
+  /** 已为该卡内容触发过「自动朗读」请求，避免 idle 重复刷 response.create */
+  const lastFlashcardAutoReadKeyRef = React.useRef<string | null>(null);
+  /** 是否曾在本轮开麦周期内向模型同步过「有卡」状态（用于判断是否要在收起时发关闭说明） */
+  const hadOpenFlashcardThisMicRef = React.useRef(false);
   const [systemState, setSystemState] = useState<"connecting" | "idle" | "listening" | "thinking" | "speaking" | "error">("idle");
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
+  const readFlashcardAgain = useCallback(() => {
+    const ws = wsRef.current;
+    const card = wordFlashcardRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !card) return;
+    requestFlashcardReadAgainTwice(ws, card);
+  }, []);
   const isCameraOnRef = React.useRef(false);
   const lastVisionAtRef = React.useRef(0);
   /** 最近一次成功识图的文案与时间戳；关摄像头时清空，避免答非所问 */
@@ -363,6 +418,80 @@ export default function App() {
   const fulfilledToolCallIdsRef = React.useRef(new Set<string>());
   const visionInFlightRef = React.useRef(false);
   const runVisionManualRef = React.useRef<(() => void) | null>(null);
+  /** 发过「必须调闪卡工具」的 user 注入后，若本轮仍无成功工具结果，用中文语音猜一张兜底卡 */
+  const lastFlashcardNudgeUtteranceRef = React.useRef<string | null>(null);
+  /** 本轮 response 内是否已成功解析并展示过闪卡工具 */
+  const flashcardToolSucceededThisResponseRef = React.useRef(false);
+  /** URL `?debug=flashcard` 或 localStorage FLASHCARD_DEBUG：右下角调试板 + 记录 WS 事件类型 */
+  const [flashcardDebugUi, setFlashcardDebugUi] = useState(false);
+  const [wsDebugRing, setWsDebugRing] = useState<string[]>([]);
+  const flashcardDebugUiRef = React.useRef(false);
+  flashcardDebugUiRef.current = flashcardDebugUi;
+
+  useEffect(() => {
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      if (sp.get("debug") === "flashcard") {
+        localStorage.setItem("FLASHCARD_DEBUG", "1");
+        setFlashcardDebugUi(true);
+      } else if (localStorage.getItem("FLASHCARD_DEBUG") === "1") {
+        setFlashcardDebugUi(true);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  /** 关麦时清闪卡；不要在每次 WS onopen 清（重连 / StrictMode 会误清导致永远看不到卡） */
+  useEffect(() => {
+    if (!isMicOn) {
+      setWordFlashcard(null);
+      lastFlashcardNudgeUtteranceRef.current = null;
+      lastFlashcardUiSyncKeyRef.current = null;
+      lastFlashcardAutoReadKeyRef.current = null;
+      hadOpenFlashcardThisMicRef.current = false;
+    }
+  }, [isMicOn]);
+
+  /** 闪卡 UI 与 Realtime 同步；非工具出卡在会话 idle 时自动请求 AI 口播卡片 */
+  useEffect(() => {
+    if (!isMicOn) return;
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+    const key = flashcardUiContextKey(wordFlashcard);
+
+    if (!wordFlashcard) {
+      if (!hadOpenFlashcardThisMicRef.current) return;
+      hadOpenFlashcardThisMicRef.current = false;
+      if (lastFlashcardUiSyncKeyRef.current === key) return;
+      lastFlashcardUiSyncKeyRef.current = key;
+      sendFlashcardUiToRealtimeConversation(socket, null);
+      flashcardLog("ui_sync.conversation_inject", { key: "__closed__", hasCard: false });
+      lastFlashcardAutoReadKeyRef.current = null;
+      return;
+    }
+
+    hadOpenFlashcardThisMicRef.current = true;
+    if (lastFlashcardUiSyncKeyRef.current !== key) {
+      lastFlashcardUiSyncKeyRef.current = key;
+      sendFlashcardUiToRealtimeConversation(socket, wordFlashcard);
+      flashcardLog("ui_sync.conversation_inject", {
+        key: key.slice(0, 72),
+        hasCard: true,
+      });
+    }
+
+    if (systemState !== "idle") {
+      flashcardLog("read_aloud.wait_idle", { key: key.slice(0, 72), state: systemState });
+      return;
+    }
+
+    if (lastFlashcardAutoReadKeyRef.current === key) return;
+    lastFlashcardAutoReadKeyRef.current = key;
+    requestFlashcardReadAloud(socket, wordFlashcard);
+    flashcardLog("read_aloud.trigger", { key: key.slice(0, 72) });
+  }, [wordFlashcard, isMicOn, systemState]);
 
   React.useEffect(() => {
     isCameraOnRef.current = isCameraOn;
@@ -425,7 +554,6 @@ export default function App() {
           visionLog("mic.ws.open", { clearedFulfilledToolCallIds: true, clearedVisionCaptionCache: true });
           fulfilledToolCallIdsRef.current.clear();
           lastVisionCaptionCacheRef.current = null;
-          setWordFlashcard(null);
           player = new SimplePCMPlayer();
           setSystemState("idle");
           setEmotion("neutral");
@@ -442,6 +570,15 @@ export default function App() {
                 }));
               }
             });
+            /** effect 可能尚未在 OPEN 后跑过：补推当前闪卡，避免「先注入调试卡再连上 WS」时模型不知道卡面 */
+            if (ws && ws.readyState === WebSocket.OPEN && wordFlashcardRef.current) {
+              hadOpenFlashcardThisMicRef.current = true;
+              lastFlashcardUiSyncKeyRef.current = null;
+              const k = flashcardUiContextKey(wordFlashcardRef.current);
+              lastFlashcardUiSyncKeyRef.current = k;
+              sendFlashcardUiToRealtimeConversation(ws, wordFlashcardRef.current);
+              flashcardLog("ui_sync.ws_open_recovery", { key: k.slice(0, 72) });
+            }
           } catch(err: any) {
             console.error("Audio processing initialized failed:", err);
             setTranscript("麦克风初始化失败: " + err.message);
@@ -460,6 +597,32 @@ export default function App() {
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
             then();
           }, 120);
+        };
+
+        /** 用户语音里出现「闪卡」等但模型未调工具时：打断当前回复并插入强约束 user 消息，逼下一轮先 show_word_flashcard */
+        const sendFlashcardIntentNudge = (userSaid: string) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          lastFlashcardNudgeUtteranceRef.current = userSaid;
+          flashcardToolSucceededThisResponseRef.current = false;
+          const text =
+            "【系统补充｜必须执行】用户刚才说：「" +
+            userSaid +
+            "」。这是在要「单词闪卡」或玩闪卡相关。你必须在本轮里**先调用**工具 show_word_flashcard：primary_text=要学的外语单词（学英文时**必须英文拼写**，作界面**大字**），secondary_text=**极简中文释义**（**小字**，通常 2～8 个汉字，禁止整句、禁止补充说明）。按用户说的主题填好两字段。**出卡之后**口播：" +
+            FLASHCARD_ORAL_PACING_RULE_ZH +
+            "不要只出卡不念。**禁止**只口头答应却不调用工具；**禁止**在口播里出现 JSON、花括号、工具名或英文字段名。";
+          visionLog("send.flashcard_intent_nudge", { preview: userSaid.slice(0, 100) });
+          flashcardLog("send.flashcard_intent_nudge", { preview: userSaid.slice(0, 100) });
+          ws.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text }],
+              },
+            })
+          );
+          ws.send(JSON.stringify({ type: "response.create" }));
         };
 
         const sendVisionToolResult = (callId: string, output: string) => {
@@ -505,24 +668,55 @@ export default function App() {
           ws.send(JSON.stringify({ type: "response.create" }));
         };
 
+        const tryFlashcardToolCall = (callId: string, argumentsStr: string) => {
+          if (!callId) return;
+          const t = argumentsStr.trim();
+          /** output_item.done 有时先于参数字符串流式完成，避免用 "{}" 占位把 call_id 锁死 */
+          if (t.length < 5 || t === "{}") {
+            visionLog("flashcard.fulfil.skip_empty_args", { callId, len: t.length });
+            flashcardLog("fulfil.skip_empty_args", { callId, len: t.length });
+            return;
+          }
+          if (fulfilledToolCallIdsRef.current.has(callId)) return;
+          const payload = parseWordFlashcardPayload(argumentsStr);
+          if (payload) {
+            fulfilledToolCallIdsRef.current.add(callId);
+            visionLog("flashcard.fulfil.ok", { callId, word: payload.primary_text });
+            flashcardLog("fulfil.ok", { callId, word: payload.primary_text });
+            lastFlashcardNudgeUtteranceRef.current = null;
+            flashcardToolSucceededThisResponseRef.current = true;
+            setWordFlashcard(payload);
+            sendFlashcardToolResult(
+              callId,
+              JSON.stringify({
+                ok: true,
+                displayed: true,
+                speak_now:
+                  "请立即用语音朗读本闪卡。" +
+                  FLASHCARD_ORAL_PACING_RULE_ZH +
+                  "不要 JSON、花括号、工具名或英文字段名。",
+              })
+            );
+          } else if (argsJsonLooksStreamIncomplete(t)) {
+            visionLog("flashcard.fulfil.incomplete_args_wait", { callId, len: t.length });
+            flashcardLog("fulfil.incomplete_args_wait", { callId, len: t.length });
+          } else {
+            fulfilledToolCallIdsRef.current.add(callId);
+            visionLog("flashcard.fulfil.bad_args", { callId, preview: argumentsStr.slice(0, 160) });
+            flashcardLog("fulfil.bad_args", { callId, preview: argumentsStr.slice(0, 160) });
+            sendFlashcardToolResult(
+              callId,
+              JSON.stringify({ ok: false, error: "invalid_flashcard_args" })
+            );
+          }
+        };
+
         const fulfilFlashcardToolsFromEvent = (evt: {
           response?: { output?: Array<Record<string, unknown>> };
           item?: Record<string, unknown>;
         }) => {
-          const calls = extractToolCalls(evt, "show_word_flashcard");
-          for (const { callId, arguments: argStr } of calls) {
-            if (fulfilledToolCallIdsRef.current.has(callId)) continue;
-            const payload = parseWordFlashcardPayload(argStr);
-            fulfilledToolCallIdsRef.current.add(callId);
-            if (payload) {
-              setWordFlashcard(payload);
-              sendFlashcardToolResult(callId, JSON.stringify({ ok: true, displayed: true }));
-            } else {
-              sendFlashcardToolResult(
-                callId,
-                JSON.stringify({ ok: false, error: "invalid_flashcard_args" })
-              );
-            }
+          for (const { callId, arguments: argStr } of extractToolCallsWide(evt, "show_word_flashcard")) {
+            tryFlashcardToolCall(callId, argStr);
           }
         };
 
@@ -786,6 +980,22 @@ export default function App() {
           }
           const evType = event.type as string | undefined;
 
+          if (flashcardDebugUiRef.current && evType) {
+            const snippet =
+              /function|tool|output_item|conversation\.item/i.test(evType) ||
+              (typeof event.name === "string" && event.name.includes("flashcard"))
+                ? String(e.data).slice(0, 140)
+                : "";
+            setWsDebugRing((prev) =>
+              [...prev, `${((performance.now() / 10) | 0) % 100000} ${evType}${snippet ? ` | ${snippet}` : ""}`].slice(
+                -40
+              )
+            );
+          }
+          if (typeof window !== "undefined" && window.localStorage?.getItem("REALTIME_DEBUG") === "1") {
+            console.log("[realtime]", evType, event);
+          }
+
           switch (evType) {
             case 'input_audio_buffer.speech_started':
               setSystemState("listening");
@@ -803,14 +1013,79 @@ export default function App() {
                setEmotion("thinking");
                if (player) player.clearAll();
                fullTranscript = "";
+               flashcardToolSucceededThisResponseRef.current = false;
                break;
             case 'response.audio_transcript.delta':
             case 'response.text.delta':
               if (event.delta) {
                 fullTranscript += String(event.delta);
-                setTranscript("回复: " + fullTranscript);
+                const { text: clean, pulled } = scrubTranscriptAndPullFlashcard(fullTranscript);
+                fullTranscript = clean;
+                if (pulled && !flashcardToolSucceededThisResponseRef.current) {
+                  visionLog("flashcard.from_transcript", { word: pulled.primary_text });
+                  flashcardLog("from_transcript.delta", { word: pulled.primary_text });
+                  setWordFlashcard(pulled);
+                }
+                const line = clean.trim();
+                setTranscript(line ? "回复: " + line : "回复中…");
               }
               break;
+            case 'response.function_call_arguments.done': {
+              const raw = event as Record<string, unknown>;
+              const nested =
+                typeof raw.item === "object" && raw.item !== null
+                  ? (raw.item as Record<string, unknown>)
+                  : {};
+              const name = String(raw.name ?? nested.name ?? "");
+              const callId = String(
+                raw.call_id ?? raw.callId ?? nested.call_id ?? nested.callId ?? raw.item_id ?? ""
+              );
+              const args = String(raw.arguments ?? nested.arguments ?? "{}");
+              visionLog("ws.function_call_arguments.done", {
+                name,
+                callId,
+                argsLen: args.length,
+                argsPreview: args.slice(0, 120),
+              });
+              flashcardLog("ws.function_call_arguments.done", { name, callId, argsLen: args.length });
+              if (name === "show_word_flashcard" && callId) {
+                tryFlashcardToolCall(callId, args);
+              } else if (name === "look_at_camera" && callId) {
+                void tryVisionPipeline("tool", callId);
+              }
+              break;
+            }
+            case 'conversation.item.done': {
+              const item = event.item as Record<string, unknown> | undefined;
+              visionLog("ws.conversation.item.done", {
+                itemType: item?.type,
+                itemName: item?.name,
+                keys: item ? Object.keys(item) : [],
+              });
+              const cam = extractToolCalls({ item }, "look_at_camera");
+              if (cam.length > 0) {
+                visionLog("tool.parse.hit", {
+                  tool: "look_at_camera",
+                  count: cam.length,
+                  callIds: cam.map((o) => o.callId),
+                });
+              }
+              for (const { callId } of cam) {
+                void tryVisionPipeline("tool", callId);
+              }
+              fulfilFlashcardToolsFromEvent({ item });
+              break;
+            }
+            case 'response.output_item.added': {
+              const item = event.item as Record<string, unknown> | undefined;
+              visionLog("ws.output_item.added", {
+                itemType: item?.type,
+                itemName: item?.name,
+                itemKeys: item ? Object.keys(item) : [],
+              });
+              fulfilFlashcardToolsFromEvent({ item });
+              break;
+            }
             case 'response.output_item.done': {
               visionLog("ws.output_item.done", {
                 itemType: (event.item as { type?: string } | undefined)?.type,
@@ -838,15 +1113,27 @@ export default function App() {
                   : typeof (event as { text?: unknown }).text === "string"
                     ? String((event as { text?: string }).text)
                     : "";
-              const hit = userSpeechRequestsVision(raw);
+              const hitVision = userSpeechRequestsVision(raw);
+              const hitFlash = userSpeechRequestsFlashcard(raw);
               visionLog("ws.asr.completed", {
                 transcript: raw,
                 cameraOn: isCameraOnRef.current,
-                willRunVision: hit,
+                willRunVision: hitVision,
+                willFlashcardNudge: hitFlash,
               });
-              // 不依赖「摄像头已开」：tryVisionPipeline 会在需要时自动 setIsCameraOn(true)，
-              // 否则用户先说话再问画面时永远不会触发本地识图。
-              if (hit) {
+              // 闪卡意图优先：避免「看一下猫的闪卡」同时走识图与闪卡两条 cancel 链互相打架
+              if (hitFlash && ws && ws.readyState === WebSocket.OPEN) {
+                flashcardLog("asr.flashcard_intent", { raw });
+                if (player) player.clearAll();
+                setSystemState("thinking");
+                setEmotion("thinking");
+                setTranscript("准备闪卡…");
+                cancelInFlightResponseThen(() => {
+                  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                  sendFlashcardIntentNudge(raw);
+                });
+              } else if (hitVision) {
+                // 不依赖「摄像头已开」：tryVisionPipeline 会在需要时自动 setIsCameraOn(true)
                 void tryVisionPipeline("asr");
               }
               break;
@@ -892,6 +1179,34 @@ export default function App() {
                 void tryVisionPipeline("tool", callId);
               }
               fulfilFlashcardToolsFromEvent(event);
+              const fcScan = extractToolCallsWide(event, "show_word_flashcard");
+              flashcardLog("response.done.flashcard_wide_scan", { count: fcScan.length });
+              const fin = scrubTranscriptAndPullFlashcard(fullTranscript);
+              fullTranscript = fin.text;
+              /** 工具出卡优先：勿用转写 JSON 或 hello 启发式覆盖本轮已成功的闪卡 */
+              if (flashcardToolSucceededThisResponseRef.current) {
+                flashcardLog("flashcard.response_done.keep_tool_card", {});
+              } else if (fin.pulled) {
+                visionLog("flashcard.from_transcript.final", { word: fin.pulled.primary_text });
+                flashcardLog("from_transcript.response_done", { word: fin.pulled.primary_text });
+                setWordFlashcard(fin.pulled);
+                lastFlashcardNudgeUtteranceRef.current = null;
+              } else if (lastFlashcardNudgeUtteranceRef.current) {
+                const src = lastFlashcardNudgeUtteranceRef.current;
+                const guess = heuristicFlashcardFromUserChinese(src);
+                if (guess) {
+                  flashcardLog("fallback.heuristic_card", guess);
+                  setWordFlashcard(guess);
+                } else {
+                  flashcardLog("fallback.heuristic_skip", { src: src.slice(0, 80) });
+                }
+                lastFlashcardNudgeUtteranceRef.current = null;
+              }
+              setTranscript(
+                fullTranscript.trim()
+                  ? "回复: " + fullTranscript.trim()
+                  : "我是表情包，请对我说话~"
+              );
               setSystemState("idle");
               setTimeout(() => {
                 if (!isStopped) setEmotion("neutral");
@@ -979,7 +1294,7 @@ export default function App() {
   const spiritReplyBg = emotion === "replying";
 
   return (
-    <div className="min-h-screen bg-slate-950 flex flex-col items-center font-sans py-16 px-4 relative overflow-hidden w-full">
+    <div className="min-h-screen bg-slate-950 flex flex-col items-center font-sans py-16 px-4 relative w-full overflow-x-auto overflow-y-auto">
       {/* Dynamic Background Elements */}
       <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
         <motion.div 
@@ -1037,18 +1352,20 @@ export default function App() {
         </div>
       </div>
 
-      {/* Face + optional flashcard */}
-      <div className="flex flex-1 w-full items-center justify-center px-3 md:px-6 pb-6">
+      {/* Face + optional flashcard：self-stretch 打破父级 items-center，否则行宽塌缩、右侧闪卡被 overflow 裁掉 */}
+      <div className="relative z-10 flex min-h-0 flex-1 w-full max-w-full self-stretch flex-col items-center justify-center px-2 sm:px-4 md:px-6 pb-6">
         <div
           className={
             wordFlashcard
-              ? "flex w-full max-w-6xl flex-col items-center justify-center gap-8 md:flex-row md:items-center md:justify-between md:gap-6"
+              ? "grid w-full max-w-6xl mx-auto grid-cols-1 items-center gap-6 md:grid-cols-2 md:gap-6 lg:gap-8"
               : "flex w-full justify-center"
           }
         >
           <div
-            className={`flex justify-center transition-transform duration-300 ease-out ${
-              wordFlashcard ? "origin-center scale-[0.82] md:scale-[0.72] md:-translate-x-2" : ""
+            className={`flex w-full shrink-0 justify-center overflow-visible transition-transform duration-300 ease-out will-change-transform ${
+              wordFlashcard
+                ? "md:justify-end md:pr-2 scale-[0.66] translate-x-2 md:scale-[0.7] md:translate-x-4 lg:translate-x-6"
+                : "scale-90 translate-x-0"
             }`}
           >
             {/* Container for the bouncy whole-body movements */}
@@ -1329,17 +1646,86 @@ export default function App() {
             </motion.div>
           </div>
 
-          <AnimatePresence mode="wait">
-            {wordFlashcard ? (
-              <WordFlashCard
-                key={`${wordFlashcard.primary_text}-${wordFlashcard.secondary_text}`}
-                {...wordFlashcard}
-                onDismiss={() => setWordFlashcard(null)}
-              />
-            ) : null}
-          </AnimatePresence>
+          {wordFlashcard ? (
+            <div className="relative z-30 flex w-full min-w-0 shrink-0 justify-center sm:max-w-md md:justify-start md:pl-2 md:max-w-none">
+              <AnimatePresence mode="wait">
+                <WordFlashCard
+                  key={`${wordFlashcard.primary_text}-${wordFlashcard.secondary_text}`}
+                  {...wordFlashcard}
+                  onDismiss={() => setWordFlashcard(null)}
+                  onReadAloud={readFlashcardAgain}
+                  readAloudDisabled={!isMicOn}
+                />
+              </AnimatePresence>
+            </div>
+          ) : null}
         </div>
       </div>
+
+      {flashcardDebugUi && (
+        <div className="fixed top-20 right-3 z-[100] w-[min(22rem,calc(100vw-1.5rem))] max-h-[55vh] overflow-hidden rounded-xl border border-emerald-500/40 bg-slate-950/95 text-left shadow-2xl backdrop-blur-md">
+          <div className="border-b border-white/10 px-3 py-2 text-[11px] font-semibold text-emerald-300">
+            闪卡调试 <span className="font-normal text-slate-500">(?debug=flashcard)</span>
+          </div>
+          <div className="max-h-[42vh] overflow-y-auto px-3 py-2 font-mono text-[10px] leading-snug text-slate-300 space-y-2">
+            <div>
+              <span className="text-slate-500">wordFlashcard:</span>{" "}
+              <span className="break-all text-amber-200/95">
+                {wordFlashcard ? JSON.stringify(wordFlashcard) : "null"}
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-500">isMicOn:</span> {String(isMicOn)}
+            </div>
+            <div className="text-slate-500">最近 WS 事件（含 function/output 时附片段）:</div>
+            <ul className="list-none space-y-0.5 pl-0 text-[9px] text-slate-400">
+              {wsDebugRing.length === 0 ? (
+                <li>（尚无；请开麦对话）</li>
+              ) : (
+                wsDebugRing.map((line, i) => (
+                  <li key={`${i}-${line.slice(0, 24)}`} className="break-all">
+                    {line}
+                  </li>
+                ))
+              )}
+            </ul>
+          </div>
+          <div className="flex flex-wrap gap-2 border-t border-white/10 px-3 py-2">
+            <button
+              type="button"
+              className="rounded-lg bg-emerald-600 px-2 py-1 text-[10px] text-white hover:bg-emerald-500"
+              onClick={() =>
+                setWordFlashcard({
+                  primary_text: "debug",
+                  secondary_text: "若能看到此卡，说明 UI 正常，问题在 WS/工具链",
+                  primary_lang: "en",
+                  secondary_lang: "zh",
+                })
+              }
+            >
+              注入测试闪卡
+            </button>
+            <button
+              type="button"
+              className="rounded-lg bg-slate-700 px-2 py-1 text-[10px] text-slate-200 hover:bg-slate-600"
+              onClick={() => setWsDebugRing([])}
+            >
+              清空日志
+            </button>
+            <button
+              type="button"
+              className="rounded-lg bg-slate-800 px-2 py-1 text-[10px] text-slate-400 hover:bg-slate-700"
+              onClick={() => {
+                localStorage.removeItem("FLASHCARD_DEBUG");
+                setFlashcardDebugUi(false);
+                setWsDebugRing([]);
+              }}
+            >
+              关闭面板
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Video Preview */}
       {isCameraOn && (
