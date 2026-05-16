@@ -15,6 +15,6 @@ View your app in AI Studio: https://ai.studio/apps/a6a106aa-cb6e-4336-bb5f-96f2c
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Set `STEPFUN_API_KEY` in `.env` (or `.env.local`) to your [阶跃星辰开放平台](https://platform.stepfun.com/) API key (used for realtime voice and camera vision)
 3. Run the app:
    `npm run dev`

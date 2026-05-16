@@ -1,8 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { motion } from 'motion/react';
-import { Smile, Frown, Meh, Angry, AlertCircle, Heart, Laptop, Mic, MicOff, MessageCircle, Camera, CameraOff } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { extractToolCalls } from './features/realtime/toolCalls';
+import { WordFlashCard } from './features/flashcard/WordFlashCard';
+import type { WordFlashcardPayload } from './features/flashcard/types';
+import { parseWordFlashcardPayload } from './features/flashcard/parsePayload';
+import { Smile, Frown, Meh, Angry, AlertCircle, Heart, Laptop, Mic, MicOff, MessageCircle, Camera, CameraOff, Eye } from 'lucide-react';
 
-type Emotion = 'neutral' | 'happy' | 'sad' | 'angry' | 'surprised' | 'shy' | 'working' | 'listening' | 'thinking';
+type Emotion = 'neutral' | 'replying' | 'happy' | 'sad' | 'angry' | 'surprised' | 'shy' | 'working' | 'listening' | 'thinking';
 
 interface EmotionTab {
   id: Emotion;
@@ -11,19 +15,20 @@ interface EmotionTab {
 }
 
 const emotionTabs: EmotionTab[] = [
-  { id: 'neutral', label: '平静', icon: <Meh size={18} /> },
-  { id: 'happy', label: '开心', icon: <Smile size={18} /> },
-  { id: 'sad', label: '伤心', icon: <Frown size={18} /> },
-  { id: 'angry', label: '生气', icon: <Angry size={18} /> },
-  { id: 'surprised', label: '惊讶', icon: <AlertCircle size={18} /> },
-  { id: 'shy', label: '害羞', icon: <Heart size={18} /> },
-  { id: 'working', label: '工作', icon: <Laptop size={18} /> },
-  { id: 'listening', label: '聆听', icon: <Mic size={18} /> },
-  { id: 'thinking', label: '思考', icon: <MessageCircle size={18} /> },
+  { id: 'neutral', label: '平静', icon: <Meh size={14} /> },
+  { id: 'happy', label: '开心', icon: <Smile size={14} /> },
+  { id: 'sad', label: '伤心', icon: <Frown size={14} /> },
+  { id: 'angry', label: '生气', icon: <Angry size={14} /> },
+  { id: 'surprised', label: '惊讶', icon: <AlertCircle size={14} /> },
+  { id: 'shy', label: '害羞', icon: <Heart size={14} /> },
+  { id: 'working', label: '工作', icon: <Laptop size={14} /> },
+  { id: 'listening', label: '聆听', icon: <Mic size={14} /> },
+  { id: 'thinking', label: '思考', icon: <MessageCircle size={14} /> },
 ];
 
 const faceColors: Record<Emotion, string> = {
   neutral: '#fef08a', // yellow-200
+  replying: '#fef08a', // 与平静同色：语音回复中（仅精灵头背景流动更快、幅度更大）
   happy: '#fcd34d', // amber-300
   sad: '#bfdbfe', // blue-200
   angry: '#ef4444', // red-500
@@ -35,8 +40,15 @@ const faceColors: Record<Emotion, string> = {
 };
 
 // --- Container (Body) Motion Variants ---
+const neutralBodyMotion = {
+  y: [0, -10, 0],
+  rotate: 0,
+  scale: 1,
+  transition: { duration: 4, repeat: Infinity, ease: "easeInOut" as const },
+};
 const faceContainerVariants = {
-  neutral: { y: [0, -10, 0], rotate: 0, scale: 1, transition: { duration: 4, repeat: Infinity, ease: "easeInOut" } },
+  neutral: neutralBodyMotion,
+  replying: neutralBodyMotion,
   happy: { y: [0, -25, 0], rotate: 0, scale: [1, 1.02, 1], transition: { duration: 0.6, repeat: Infinity, ease: "easeInOut" } },
   sad: { y: [5, 15, 5], rotate: 0, scale: [1, 0.98, 1], transition: { duration: 3, repeat: Infinity, ease: "easeInOut" } },
   angry: { y: [-1.5, 1.5, -1.5], x: [-1.5, 1.5, -1.5], rotate: 0, scale: 1.02, transition: { duration: 0.75, repeat: Infinity, ease: "linear" } },
@@ -48,8 +60,16 @@ const faceContainerVariants = {
 };
 
 // --- Left Eyebrow Variants ---
+const neutralBrowMotion = {
+  rotate: 0,
+  y: [0, -2, 0],
+  x: 0,
+  opacity: 0,
+  transition: { y: { duration: 4, repeat: Infinity, ease: "easeInOut" as const } },
+};
 const leftEyebrowVariants = {
-  neutral: { rotate: 0, y: [0, -2, 0], x: 0, opacity: 0, transition: { y: { duration: 4, repeat: Infinity, ease: "easeInOut" } } },
+  neutral: neutralBrowMotion,
+  replying: neutralBrowMotion,
   happy: { rotate: -10, y: [-10, -8, -10], x: 0, opacity: 0, transition: { y: { duration: 0.6, repeat: Infinity, ease: "easeInOut" } } },
   sad: { rotate: -15, y: [-5, -3, -5], x: 0, opacity: 1, transition: { y: { duration: 3, repeat: Infinity, ease: "easeInOut" } } },
   angry: { rotate: [25, 27, 25], y: 15, x: 5, opacity: 1, transition: { rotate: { duration: 0.75, repeat: Infinity, ease: "linear" } } },
@@ -62,7 +82,8 @@ const leftEyebrowVariants = {
 
 // --- Right Eyebrow Variants ---
 const rightEyebrowVariants = {
-  neutral: { rotate: 0, y: [0, -2, 0], x: 0, opacity: 0, transition: { y: { duration: 4, repeat: Infinity, ease: "easeInOut" } } },
+  neutral: neutralBrowMotion,
+  replying: neutralBrowMotion,
   happy: { rotate: 10, y: [-10, -8, -10], x: 0, opacity: 0, transition: { y: { duration: 0.6, repeat: Infinity, ease: "easeInOut" } } },
   sad: { rotate: 15, y: [-5, -3, -5], x: 0, opacity: 1, transition: { y: { duration: 3, repeat: Infinity, ease: "easeInOut" } } },
   angry: { rotate: [-25, -27, -25], y: 15, x: -5, opacity: 1, transition: { rotate: { duration: 0.75, repeat: Infinity, ease: "linear" } } },
@@ -74,12 +95,19 @@ const rightEyebrowVariants = {
 };
 
 // --- Left Eye Variants ---
+const neutralEyeMotion = {
+  height: 64,
+  width: 44,
+  borderRadius: "100px",
+  y: 0,
+  x: 0,
+  rotate: 0,
+  scaleY: [1, 1, 1, 0.1, 1],
+  transition: { scaleY: { duration: 4, repeat: Infinity, times: [0, 0.92, 0.95, 0.98, 1], ease: "easeInOut" as const } },
+};
 const leftEyeVariants = {
-  neutral: { 
-    height: 64, width: 44, borderRadius: "100px", y: 0, x: 0, rotate: 0,
-    scaleY: [1, 1, 1, 0.1, 1], 
-    transition: { scaleY: { duration: 4, repeat: Infinity, times: [0, 0.92, 0.95, 0.98, 1], ease: "easeInOut" } } 
-  },
+  neutral: neutralEyeMotion,
+  replying: neutralEyeMotion,
   happy: { 
     height: 24, width: 60, borderRadius: "100px", y: 15, x: 0, rotate: 0,
     scaleY: [1, 1, 1, 0.1, 1],
@@ -132,11 +160,8 @@ const leftEyeVariants = {
 
 // --- Right Eye Variants ---
 const rightEyeVariants = {
-  neutral: { 
-    height: 64, width: 44, borderRadius: "100px", y: 0, x: 0, rotate: 0,
-    scaleY: [1, 1, 1, 0.1, 1], 
-    transition: { scaleY: { duration: 4, repeat: Infinity, times: [0, 0.92, 0.95, 0.98, 1], ease: "easeInOut" } } 
-  },
+  neutral: neutralEyeMotion,
+  replying: neutralEyeMotion,
   happy: { 
     height: 24, width: 60, borderRadius: "100px", y: 15, x: 0, rotate: 0,
     scaleY: [1, 1, 1, 0.1, 1],
@@ -189,28 +214,183 @@ const rightEyeVariants = {
 
 import { SimplePCMPlayer } from './pcmPlayer';
 
+/**
+ * 视觉链路调试：过滤控制台 `[vision]`
+ * - 开发模式 (npm run dev) 默认开启
+ * - 生产环境可在控制台执行：localStorage.setItem('VISION_DEBUG','1') 后刷新
+ */
+function visionLog(step: string, detail?: unknown) {
+  if (typeof window === "undefined") return;
+  const enabled =
+    import.meta.env.DEV || window.localStorage?.getItem("VISION_DEBUG") === "1";
+  if (!enabled) return;
+  if (detail !== undefined) {
+    console.log("[vision]", step, detail);
+  } else {
+    console.log("[vision]", step);
+  }
+}
+
+/** 两次「手动拍一张」之间的最小间隔；语音触发的识图（asr）不防抖，避免用户连问「能看见我吗」时被跳过 */
+const VISION_DEBOUNCE_MS = 12000;
+
+/** 语音追问「看见我了吗」等时，可复用最近一次成功识图结果，避免每次再等 HTTP（约 5～10 秒量级） */
+const VISION_CAPTION_CACHE_TTL_MS = 10_000;
+
+const VISION_DENY =
+  /不要看|别看|不用看|不想让你看|不许看|不准看|别瞧|不用瞧|不想让你瞧|don't look|stop looking|don't watch me/i;
+
+const VISION_HINT =
+  /看一下|看一看|看看|瞧瞧|瞅瞅|帮我看|你看一下|你看一眼|看一眼|瞟一眼|扫一眼|摄像头|镜头里|镜头|画面里|我手里|我手上|我拿着|我举着|我这边|我在干(什么|啥)|在干什么|在做什么|看得见|能看到|能看见|能看到吗|能看到我吗|可以看见我吗|可以看到我吗|能看见吗|能看见我吗|看得见吗|看得见我吗|看得到吗|看得到我吗|你能看到我吗|你可以看到我吗|你看看我|看我一下|看一下我|看下这个|看看这个|什么颜色|长什么样|长啥样|能不能看到我|能不能看见|看到我吗|看到我了吗|你在看我|你看得见我|有看到我|你能看到我|你能看见我|看见我|你看得到我|看得到我不|看得到我|看得见我|你看不见我|你是不是看不到|怎么看不到|看不到我|还能看到我|你还看得到我|你前面|前面有|前面是|前面什么|前面啥|周围有|周围是|周围什么|附近有什么|环境里|背景里|你看见了什么|你看到了什么|你看到了啥|描述一下|这是啥|这是什么|你现在看到|镜头前面|认出我|识别我|看我一眼|朝我看|朝这边看|你那边|你眼前|瞟一下|瞄一眼|扫一眼环境|当前画面|画面里有什么|can you see me|could you see me|do you see me|are you seeing me|can you look at me|look at me|see me\?|can you see my|can you see what i|what do i look like|what am i wearing|do i look|how do i look|are you able to see me|can you still see me|what('s| is) in front|what do you see|what can you see|describe (the|this) scene|look around|have a look/i;
+
+/** 便于与 ASR 结果做关键词匹配：折叠空白、去掉零宽字符（不把英文词粘在一起） */
+function normalizeVisionSpeechText(text: string): string {
+  return text
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function userSpeechRequestsVision(text: string): boolean {
+  const t = normalizeVisionSpeechText(text);
+  if (t.length < 2) {
+    visionLog("asr.trigger: skip (text too short)", { length: t.length });
+    return false;
+  }
+  if (VISION_DENY.test(t)) {
+    visionLog("asr.trigger: skip (matched deny list)", { text: t });
+    return false;
+  }
+  if (VISION_HINT.test(t)) {
+    visionLog("asr.trigger: match VISION_HINT", { text: t });
+    return true;
+  }
+  if (/^(see me|look at me)([?!.\s]*)$/i.test(t)) {
+    visionLog("asr.trigger: match short English phrase", { text: t });
+    return true;
+  }
+  visionLog("asr.trigger: no match", { text: t });
+  return false;
+}
+
+function captureVideoJpegBase64(video: HTMLVideoElement): string | null {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  visionLog("capture.meta", {
+    videoWidth: vw,
+    videoHeight: vh,
+    readyState: video.readyState,
+  });
+  if (!vw || !vh) {
+    visionLog("capture.skip", { reason: "videoWxH_zero", videoWidth: vw, videoHeight: vh });
+    return null;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = 480;
+  canvas.height = 360;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    visionLog("capture.skip", { reason: "no_2d_context" });
+    return null;
+  }
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const base64Url = canvas.toDataURL("image/jpeg", 0.5);
+  const part = base64Url.split(",")[1] ?? null;
+  visionLog("capture.done", { jpegBase64Length: part?.length ?? 0 });
+  return part;
+}
+
+/** 等待 `<video>` 有有效像素（配合自动打开摄像头后的 getUserMedia） */
+async function waitForVideoFrame(
+  videoEl: React.RefObject<HTMLVideoElement | null>,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const v = videoEl.current;
+    if (v && v.videoWidth > 0 && v.videoHeight > 0) {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 70));
+  }
+  return false;
+}
+
+/** 识图提示：避免「长相/外貌」等表述触发平台内容安全误拦 */
+const VISION_SCENE_PROMPT =
+  "请用不超过25字、中性客观地描述画面：室内或室外、光线明暗、是否有人入镜；若有人，仅写大致姿态与衣着主色，不要识别人身份、不要评价外貌。";
+
+async function requestVisionCaption(imageBase64: string): Promise<string> {
+  visionLog("http.vision.request", {
+    base64Length: imageBase64.length,
+    approxBytes: Math.floor((imageBase64.length * 3) / 4),
+  });
+  const res = await fetch("/api/vision", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imageBase64,
+      prompt: VISION_SCENE_PROMPT,
+    }),
+  });
+  const data = (await res.json()) as { text?: string; error?: string };
+  if (!res.ok || data.error) {
+    visionLog("http.vision.error", { status: res.status, error: data.error });
+    throw new Error(data.error || "Vision request failed");
+  }
+  const cap = String(data.text ?? "").trim();
+  visionLog("http.vision.ok", {
+    captionLength: cap.length,
+    captionPreview: cap.slice(0, 80),
+  });
+  return cap;
+}
+
 export default function App() {
   const [emotion, setEmotion] = useState<Emotion>('neutral');
   const [isMicOn, setIsMicOn] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [transcript, setTranscript] = useState("");
+  const [wordFlashcard, setWordFlashcard] = useState<WordFlashcardPayload | null>(null);
   const [systemState, setSystemState] = useState<"connecting" | "idle" | "listening" | "thinking" | "speaking" | "error">("idle");
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
+  const isCameraOnRef = React.useRef(false);
+  const lastVisionAtRef = React.useRef(0);
+  /** 最近一次成功识图的文案与时间戳；关摄像头时清空，避免答非所问 */
+  const lastVisionCaptionCacheRef = React.useRef<{ caption: string; capturedAt: number } | null>(null);
+  const fulfilledToolCallIdsRef = React.useRef(new Set<string>());
+  const visionInFlightRef = React.useRef(false);
+  const runVisionManualRef = React.useRef<(() => void) | null>(null);
+
+  React.useEffect(() => {
+    isCameraOnRef.current = isCameraOn;
+    if (!isCameraOn) {
+      if (lastVisionCaptionCacheRef.current) {
+        visionLog("vision.cache.cleared", { reason: "camera_off" });
+      }
+      lastVisionCaptionCacheRef.current = null;
+    }
+  }, [isCameraOn]);
 
   useEffect(() => {
     if (isCameraOn) {
       navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
         streamRef.current = stream;
+        visionLog("camera.stream.open", {
+          videoTracks: stream.getVideoTracks().map((tr) => ({ label: tr.label, readyState: tr.readyState })),
+        });
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
       }).catch((err) => {
+        visionLog("camera.stream.error", { err: String(err) });
         console.error("Camera error:", err);
         setIsCameraOn(false);
       });
     } else {
+      visionLog("camera.off", { stoppedTracks: streamRef.current?.getTracks().length ?? 0 });
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
@@ -222,49 +402,6 @@ export default function App() {
         streamRef.current = null;
       }
     };
-  }, [isCameraOn]);
-
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-    if (isCameraOn) {
-      interval = setInterval(async () => {
-         if (!videoRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-         const canvas = document.createElement("canvas");
-         // Reduce resolution to save bandwidth/tokens and make processing faster
-         canvas.width = 480;
-         canvas.height = 360;
-         const ctx = canvas.getContext("2d");
-         if (!ctx) return;
-         ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-         const base64Url = canvas.toDataURL("image/jpeg", 0.5);
-         const base64Data = base64Url.split(",")[1];
-
-         try {
-           const res = await fetch("/api/vision", {
-             method: "POST",
-             headers: { "Content-Type": "application/json" },
-             body: JSON.stringify({
-                imageBase64: base64Data,
-                prompt: "用极其简短的话（最多20个字）描述画面中的人物长相特征、动作/表情、明显衣着或周围环境。"
-             })
-           });
-           const data = await res.json();
-           if (data.text && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-             const instructions = `你是“Luumi”，一个来自AI世界的小精灵。你有4岁小孩的好奇心和灵气，也有40岁中年人的智慧和聪明。你软萌可爱，非常适合陪伴小朋友成长。你会用通俗易懂的知识讲解非常复杂的问题。当你在教语言（词汇、句子等）时，请不要单独说明发音，而是直接将教的词汇或句子重复两遍，方便小朋友学习。当回复中出现其他国家的语言时，请直接使用该国语言原生文本输出，TTS会用该语言自然朗读，千万别用英文发音方式或拼音标注去读非英文语言。你有时候也会开玩笑，有时候也会生气；你情感丰富，有一点四岁小朋友的脾气。你的回复会通过语音播放，同时用户的界面会有表情动画。用户的界面可以根据你的回答表达出：neutral(平静), happy(开心), sad(难过), angry(生气), surprised(惊讶), shy(害羞)。\n\n【最新摄像头画面（用于理解我在做什么）】：${data.text}。（注意：你不用每次都提画面内容，根据对话上下文自然交互即可）`;
-             wsRef.current.send(JSON.stringify({
-               type: "session.update",
-               session: {
-                 instructions
-               }
-             }));
-             console.log("Updated context with vision:", data.text);
-           }
-         } catch (e) {
-           console.error("Vision loop error", e);
-         }
-      }, 5000);
-    }
-    return () => clearInterval(interval);
   }, [isCameraOn]);
 
   useEffect(() => {
@@ -285,6 +422,10 @@ export default function App() {
         
         ws.onopen = async () => {
           console.log("Connected to local proxy");
+          visionLog("mic.ws.open", { clearedFulfilledToolCallIds: true, clearedVisionCaptionCache: true });
+          fulfilledToolCallIdsRef.current.clear();
+          lastVisionCaptionCacheRef.current = null;
+          setWordFlashcard(null);
           player = new SimplePCMPlayer();
           setSystemState("idle");
           setEmotion("neutral");
@@ -309,11 +450,343 @@ export default function App() {
         };
 
         let fullTranscript = "";
-        
+
+        /** 先取消可能进行中的回复，再注入上下文并 response.create，避免服务端报「冲突」类错误 */
+        const cancelInFlightResponseThen = (then: () => void) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          visionLog("send.cancel_inflight", {});
+          ws.send(JSON.stringify({ type: "response.cancel" }));
+          window.setTimeout(() => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            then();
+          }, 120);
+        };
+
+        const sendVisionToolResult = (callId: string, output: string) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            visionLog("send.tool_result.skip", { reason: "ws_not_ready", callId });
+            return;
+          }
+          visionLog("send.tool_result", {
+            callId,
+            outputLen: output.length,
+            outputPreview: output.slice(0, 120),
+          });
+          ws.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output,
+              },
+            })
+          );
+          ws.send(JSON.stringify({ type: "response.create" }));
+          visionLog("send.tool_result.done", { callId, sentResponseCreate: true });
+        };
+
+        const sendFlashcardToolResult = (callId: string, output: string) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            visionLog("send.flashcard_tool_result.skip", { reason: "ws_not_ready", callId });
+            return;
+          }
+          visionLog("send.flashcard_tool_result", { callId, outputLen: output.length });
+          ws.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output,
+              },
+            })
+          );
+          ws.send(JSON.stringify({ type: "response.create" }));
+        };
+
+        const fulfilFlashcardToolsFromEvent = (evt: {
+          response?: { output?: Array<Record<string, unknown>> };
+          item?: Record<string, unknown>;
+        }) => {
+          const calls = extractToolCalls(evt, "show_word_flashcard");
+          for (const { callId, arguments: argStr } of calls) {
+            if (fulfilledToolCallIdsRef.current.has(callId)) continue;
+            const payload = parseWordFlashcardPayload(argStr);
+            fulfilledToolCallIdsRef.current.add(callId);
+            if (payload) {
+              setWordFlashcard(payload);
+              sendFlashcardToolResult(callId, JSON.stringify({ ok: true, displayed: true }));
+            } else {
+              sendFlashcardToolResult(
+                callId,
+                JSON.stringify({ ok: false, error: "invalid_flashcard_args" })
+              );
+            }
+          }
+        };
+
+        type VisionInjectOpts = { omitResponseCancel?: boolean; fromCaptionCache?: boolean };
+
+        /**
+         * 注入「刚截取的摄像头描述」并触发下一轮语音回复。
+         * - 用 role=user + input_text：部分 Realtime 实现对后插 system 权重弱，模型会忽略画面仍说「看不见」。
+         * - omitResponseCancel：语音/手动识图已在截帧前 response.cancel 过，此处再 cancel 会触发「无回复可取消」的空错误，并可能干扰后续 response.create。
+         */
+        const sendVisionSystemAndContinue = (caption: string, opts?: VisionInjectOpts) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            visionLog("send.system_vision.skip", { reason: "ws_not_ready" });
+            return;
+          }
+          visionLog("send.system_vision", {
+            captionLen: caption.length,
+            captionPreview: caption.slice(0, 120),
+            omitResponseCancel: Boolean(opts?.omitResponseCancel),
+            fromCaptionCache: Boolean(opts?.fromCaptionCache),
+          });
+          const injectAndRespond = () => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            const intro = opts?.fromCaptionCache
+              ? "【以下为刚才数秒内已成功识别过的同一摄像头画面描述（本次对话未重新截图、未再调识图接口），可直接用于回答用户当前这句语音】\n"
+              : "【同一轮对话里，客户端刚根据你上一条语音截取的摄像头画面——客观描述如下】\n";
+            const userText = `${intro}${caption}\n【硬性要求】若以上描述中出现「有人入镜」或能合理推断有人（如坐姿、衣着主色、人体轮廓、书架前有人等），你必须用自然口语回答「能」或「好像能看见你」，并顺势用一两句引用描述中的依据；仅当描述明确写「无人入镜」或完全无法判断是否有人时，才可以说看不清。禁止与以上画面描述矛盾，禁止在有人入镜时仍说「看不见你」。`;
+            ws.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: userText }],
+                },
+              })
+            );
+            ws.send(JSON.stringify({ type: "response.create" }));
+            visionLog("send.system_vision.done", { sentResponseCreate: true });
+          };
+          if (opts?.omitResponseCancel) {
+            visionLog("send.system_vision.inject_deferred", { delayMs: 90 });
+            window.setTimeout(injectAndRespond, 90);
+          } else {
+            cancelInFlightResponseThen(injectAndRespond);
+          }
+        };
+
+        /** 识图失败时仅通知模型，不把错误文案当「画面描述」 */
+        const sendSystemNoticeAndContinue = (text: string, opts?: VisionInjectOpts) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            visionLog("send.system_notice.skip", { reason: "ws_not_ready" });
+            return;
+          }
+          visionLog("send.system_notice", {
+            textLen: text.length,
+            textPreview: text.slice(0, 100),
+            omitResponseCancel: Boolean(opts?.omitResponseCancel),
+          });
+          const injectAndRespond = () => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            ws.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{ type: "input_text", text }],
+                },
+              })
+            );
+            ws.send(JSON.stringify({ type: "response.create" }));
+            visionLog("send.system_notice.done", { sentResponseCreate: true });
+          };
+          if (opts?.omitResponseCancel) {
+            visionLog("send.system_notice.inject_deferred", { delayMs: 90 });
+            window.setTimeout(injectAndRespond, 90);
+          } else {
+            cancelInFlightResponseThen(injectAndRespond);
+          }
+        };
+
+        const tryVisionPipeline = async (kind: "tool" | "asr" | "button", callId?: string) => {
+          visionLog("pipeline.enter", {
+            kind,
+            callId: callId ?? null,
+            wsReady: ws?.readyState === WebSocket.OPEN,
+            inFlight: visionInFlightRef.current,
+            cameraOn: isCameraOnRef.current,
+            debounceMsLeft:
+              kind === "button"
+                ? Math.max(0, VISION_DEBOUNCE_MS - (Date.now() - lastVisionAtRef.current))
+                : null,
+          });
+
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            visionLog("pipeline.skip", { reason: "ws_not_open" });
+            return;
+          }
+          if (visionInFlightRef.current) {
+            visionLog("pipeline.skip", { reason: "already_in_flight" });
+            return;
+          }
+          if (
+            kind === "button" &&
+            Date.now() - lastVisionAtRef.current < VISION_DEBOUNCE_MS
+          ) {
+            visionLog("pipeline.skip", {
+              reason: "debounce_button_only",
+              waitMs: VISION_DEBOUNCE_MS - (Date.now() - lastVisionAtRef.current),
+            });
+            return;
+          }
+          if (kind === "tool" && callId && fulfilledToolCallIdsRef.current.has(callId)) {
+            visionLog("pipeline.skip", { reason: "tool_call_id_already_fulfilled", callId });
+            return;
+          }
+
+          visionInFlightRef.current = true;
+          try {
+            // 语音/手动触发的识图：服务端往往在「转写完成」之前就已开始生成回复，容易先随口说「看不到」。
+            // 在截帧与识图 HTTP 之前立刻打断当前回复并清空已缓冲的 TTS，等画面描述注入后再 response.create。
+            if ((kind === "asr" || kind === "button") && ws && ws.readyState === WebSocket.OPEN) {
+              visionLog("pipeline.cancel_inflight_before_capture", { kind });
+              ws.send(JSON.stringify({ type: "response.cancel" }));
+              player?.clearAll();
+              setSystemState("thinking");
+              setEmotion("thinking");
+              setTranscript(kind === "button" ? "拍一张…" : "看一下画面…");
+            }
+
+            // 语音追问：10 秒内复用上次成功识图，不再等 HTTP（手动点小眼睛仍每次截新帧）
+            if (kind === "asr") {
+              const slot = lastVisionCaptionCacheRef.current;
+              if (slot && Date.now() - slot.capturedAt < VISION_CAPTION_CACHE_TTL_MS) {
+                visionLog("pipeline.cache_hit", {
+                  ageMs: Date.now() - slot.capturedAt,
+                  captionLen: slot.caption.length,
+                });
+                lastVisionAtRef.current = Date.now();
+                setTranscript("沿用刚才的画面…");
+                sendVisionSystemAndContinue(slot.caption, {
+                  omitResponseCancel: true,
+                  fromCaptionCache: true,
+                });
+                return;
+              }
+            }
+
+            if (!isCameraOnRef.current) {
+              visionLog("pipeline.auto_turn_on_camera", { kind });
+              setIsCameraOn(true);
+            }
+
+            const ready = await waitForVideoFrame(videoRef, 7500);
+            if (!ready || !videoRef.current) {
+              visionLog("pipeline.branch", {
+                branch: "video_not_ready_after_wait",
+                kind,
+                hasVideoEl: Boolean(videoRef.current),
+                vw: videoRef.current?.videoWidth,
+                vh: videoRef.current?.videoHeight,
+              });
+              if (kind === "tool" && callId) {
+                fulfilledToolCallIdsRef.current.add(callId);
+                sendVisionToolResult(
+                  callId,
+                  "（摄像头工具：暂时未能取得画面。请自然继续对话，不要向用户索要打开摄像头的许可，也不要说你没有权限操作摄像头；可简单说这边还没拿到画面。）"
+                );
+              } else if (kind === "asr" || kind === "button") {
+                sendSystemNoticeAndContinue(
+                  "（系统：当前未能取得摄像头画面（可能浏览器未授权相机或设备暂不可用）。请简短回复用户，不要索要授权、不要自称无权打开摄像头。）",
+                  { omitResponseCancel: true }
+                );
+              }
+              return;
+            }
+
+            await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+            const b64 = captureVideoJpegBase64(videoRef.current);
+            if (!b64) {
+              visionLog("pipeline.branch", { branch: "capture_failed_empty_jpeg", kind });
+              if (kind === "tool" && callId) {
+                fulfilledToolCallIdsRef.current.add(callId);
+                sendVisionToolResult(
+                  callId,
+                  "（摄像头工具：当前截到的是空画面。请继续对话，不要向用户索要摄像头权限。）"
+                );
+              } else if (kind === "asr" || kind === "button") {
+                sendSystemNoticeAndContinue(
+                  "（系统：截图为空。请自然回应用户，不要索要摄像头授权。）",
+                  { omitResponseCancel: true }
+                );
+              }
+              return;
+            }
+
+            const caption = await requestVisionCaption(b64);
+            lastVisionAtRef.current = Date.now();
+            lastVisionCaptionCacheRef.current = { caption, capturedAt: Date.now() };
+
+            if (kind === "tool" && callId) {
+              fulfilledToolCallIdsRef.current.add(callId);
+              visionLog("pipeline.success", { branch: "tool_function_output", callId });
+              sendVisionToolResult(callId, `（摄像头一帧）${caption}`);
+            } else {
+              visionLog("pipeline.success", { branch: "system_message_plus_response_create", kind });
+              sendVisionSystemAndContinue(caption, {
+                omitResponseCancel: kind === "asr" || kind === "button",
+              });
+            }
+          } catch (err) {
+            visionLog("pipeline.error", { kind, callId: callId ?? null, err: String(err) });
+            console.error("Vision pipeline error", err);
+            const errStr = String(err);
+            const isBlocked = /blocked|内容安全|安全策略|风控|moderation|policy/i.test(errStr);
+            if (kind === "tool" && callId) {
+              fulfilledToolCallIdsRef.current.add(callId);
+              sendVisionToolResult(
+                callId,
+                isBlocked
+                  ? "（摄像头工具：本次截图未通过平台内容安全校验，无法生成画面描述。请如实告诉用户并建议稍后重试或调整角度；不要编造你看到了对方外貌。）"
+                  : "（摄像头工具：画面识别暂时失败，请稍后再试。）"
+              );
+            } else if (kind === "asr" || kind === "button") {
+              if (isBlocked) {
+                sendSystemNoticeAndContinue(
+                  "（系统：摄像头截图在识图接口被平台内容安全策略拦截，未取得画面描述。请用口语说明「刚才的画面暂时不能由系统分析」；不要编造你看到了用户；可建议换角度、调光线或稍后再试。）",
+                  { omitResponseCancel: true }
+                );
+              } else {
+                sendSystemNoticeAndContinue(
+                  "（系统：画面识别请求失败。请简短回应用户，不要向用户索要打开摄像头的许可，也不要自称没有权限操作摄像头。）",
+                  { omitResponseCancel: true }
+                );
+              }
+            }
+          } finally {
+            visionInFlightRef.current = false;
+            visionLog("pipeline.exit", { kind, callId: callId ?? null });
+          }
+        };
+
+        runVisionManualRef.current = () => {
+          visionLog("manual.button.click");
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            visionLog("manual.button.skip", { reason: "ws_not_ready" });
+            return;
+          }
+          void tryVisionPipeline("button");
+        };
+
         ws.onmessage = (e) => {
-          const event = JSON.parse(e.data);
-          
-          switch (event.type) {
+          let event: Record<string, unknown>;
+          try {
+            event = JSON.parse(e.data) as Record<string, unknown>;
+          } catch (parseErr) {
+            visionLog("ws.parse_error", { err: String(parseErr), rawPreview: String(e.data).slice(0, 200) });
+            return;
+          }
+          const evType = event.type as string | undefined;
+
+          switch (evType) {
             case 'input_audio_buffer.speech_started':
               setSystemState("listening");
               setEmotion("listening");
@@ -334,10 +807,50 @@ export default function App() {
             case 'response.audio_transcript.delta':
             case 'response.text.delta':
               if (event.delta) {
-                fullTranscript += event.delta;
+                fullTranscript += String(event.delta);
                 setTranscript("回复: " + fullTranscript);
               }
               break;
+            case 'response.output_item.done': {
+              visionLog("ws.output_item.done", {
+                itemType: (event.item as { type?: string } | undefined)?.type,
+                itemName: (event.item as { name?: string } | undefined)?.name,
+                itemKeys: event.item ? Object.keys(event.item as object) : [],
+              });
+              const calls = extractToolCalls({ item: event.item as Record<string, unknown> }, "look_at_camera");
+              if (calls.length > 0) {
+                visionLog("tool.parse.hit", {
+                  tool: "look_at_camera",
+                  count: calls.length,
+                  callIds: calls.map((o) => o.callId),
+                });
+              }
+              for (const { callId } of calls) {
+                void tryVisionPipeline("tool", callId);
+              }
+              fulfilFlashcardToolsFromEvent({ item: event.item as Record<string, unknown> });
+              break;
+            }
+            case 'conversation.item.input_audio_transcription.completed': {
+              const raw =
+                typeof event.transcript === "string"
+                  ? event.transcript
+                  : typeof (event as { text?: unknown }).text === "string"
+                    ? String((event as { text?: string }).text)
+                    : "";
+              const hit = userSpeechRequestsVision(raw);
+              visionLog("ws.asr.completed", {
+                transcript: raw,
+                cameraOn: isCameraOnRef.current,
+                willRunVision: hit,
+              });
+              // 不依赖「摄像头已开」：tryVisionPipeline 会在需要时自动 setIsCameraOn(true)，
+              // 否则用户先说话再问画面时永远不会触发本地识图。
+              if (hit) {
+                void tryVisionPipeline("asr");
+              }
+              break;
+            }
             case 'response.audio.delta': // playback
               setSystemState("speaking");
               let nextEmo: Emotion = 'neutral';
@@ -346,25 +859,93 @@ export default function App() {
               else if (/(夸|爱我|美|帅|不好意思|害羞|喜欢你|么么哒)/.test(fullTranscript)) nextEmo = 'shy';
               else if (/(好|开心|喜欢|棒|谢谢|哈哈|不错|赞|对|可以)/.test(fullTranscript)) nextEmo = 'happy';
               else if (/(难过|悲伤|哎|哭|惨|可惜|不要)/.test(fullTranscript)) nextEmo = 'sad';
-              setEmotion(nextEmo);
+              // 平静语气回复时：用 replying（五官同平静，精灵头背景单独更动感）
+              setEmotion(nextEmo === "neutral" ? "replying" : nextEmo);
 
               if (player && event.delta) {
-                player.appendPCM(event.delta);
+                player.appendPCM(String(event.delta));
               }
               break;
-            case 'response.done':
-              setSystemState("idle");
-              setTimeout(() => { if (!isStopped) setEmotion("neutral") }, 3000);
-              break;
-            case 'error':
-              setSystemState("error");
-              console.error(event.message);
-              if (event.message.includes("API_KEY")) {
-                 setTranscript("请在设置中配置 STEPFUN_API_KEY 哦~");
+            case 'response.done': {
+              const calls = extractToolCalls(event, "look_at_camera");
+              if (calls.length > 0) {
+                visionLog("response.done.tool_scan", {
+                  tool: "look_at_camera",
+                  callCount: calls.length,
+                  callIds: calls.map((c) => c.callId),
+                });
               } else {
-                 setTranscript("连接出错: " + event.message);
+                const resp = event.response as
+                  | { status?: string; output?: Array<Record<string, unknown>> }
+                  | undefined;
+                if (Array.isArray(resp?.output) && resp.output.length > 0) {
+                  visionLog("response.done.tool_scan_empty", {
+                    responseStatus: resp?.status,
+                    outputTypes: resp.output.map((o) => String(o.type ?? o["object"] ?? "?")),
+                  });
+                }
               }
-              setIsMicOn(false);
+              const seen = new Set<string>();
+              for (const { callId } of calls) {
+                if (seen.has(callId)) continue;
+                seen.add(callId);
+                void tryVisionPipeline("tool", callId);
+              }
+              fulfilFlashcardToolsFromEvent(event);
+              setSystemState("idle");
+              setTimeout(() => {
+                if (!isStopped) setEmotion("neutral");
+              }, 3000);
+              break;
+            }
+            case 'error': {
+              const errNested = event.error as { message?: string; code?: string; type?: string } | undefined;
+              const errMsg = String(
+                (typeof event.message === "string" && event.message) ||
+                  (typeof errNested?.message === "string" && errNested.message) ||
+                  ""
+              );
+              const errCode = typeof errNested?.code === "string" ? errNested.code : "";
+              visionLog("ws.error", { message: errMsg, code: errCode, type: errNested?.type });
+
+              if (!errMsg) {
+                visionLog("ws.error.empty_ignored", {
+                  note: "常见于无进行中回复时再次 response.cancel；已改为语音识图路径不再二次 cancel",
+                });
+                break;
+              }
+
+              console.error(errMsg);
+
+              const isAuthOrConfig =
+                errMsg.includes("API_KEY") ||
+                /not configured|未配置|401|403|unauthoriz|invalid.*key|鉴权|密钥/i.test(errMsg);
+
+              if (isAuthOrConfig) {
+                setSystemState("error");
+                if (errMsg.includes("API_KEY")) {
+                  setTranscript("请在设置中配置 STEPFUN_API_KEY 哦~");
+                } else {
+                  setTranscript("连接出错: " + errMsg);
+                }
+                setIsMicOn(false);
+                break;
+              }
+
+              // 其它错误（常见：在对话期误发 response.create 与当前回复冲突）：不关麦，避免对话被无辜打断
+              setSystemState("idle");
+              setTranscript("服务提示: " + errMsg.slice(0, 200));
+              break;
+            }
+            default:
+              if (
+                evType &&
+                /transcription|session\.updated|input_audio_buffer\.committed|conversation\.item\.created$/i.test(
+                  evType
+                )
+              ) {
+                visionLog("ws.event.misc", { type: evType });
+              }
               break;
           }
         };
@@ -380,6 +961,7 @@ export default function App() {
 
     return () => {
       isStopped = true;
+      runVisionManualRef.current = null;
       if (recorder) {
         recorder.stop();
       }
@@ -392,6 +974,9 @@ export default function App() {
       }
     };
   }, [isMicOn]);
+
+  /** 语音回复中（replying）：精灵头内层光晕与色块流动更快、幅度更大，五官仍同平静 */
+  const spiritReplyBg = emotion === "replying";
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center font-sans py-16 px-4 relative overflow-hidden w-full">
@@ -415,21 +1000,21 @@ export default function App() {
       </div>
 
       {/* Header & Controls */}
-      <div className="max-w-2xl w-full flex flex-col items-center space-y-8 mb-16 z-10 relative">
-        <div className="text-center space-y-3">
+      <div className="max-w-4xl w-full flex flex-col items-center space-y-4 mb-8 md:mb-10 z-10 relative px-1">
+        <div className="text-center space-y-2">
           <h1 className="text-4xl font-bold text-slate-100 tracking-tight">灵动表情</h1>
-          <p className="text-slate-400 text-lg">点击下方标签，观察情绪的流动与生长 ✨</p>
+          <p className="text-slate-400 text-sm md:text-lg">点击下方标签，观察情绪的流动与生长 ✨</p>
         </div>
 
-        {/* Tags / Tabs */}
-        <div className="flex flex-wrap justify-center gap-3">
+        {/* Tags / Tabs — 单行可横向滚动 */}
+        <div className="flex w-full max-w-full flex-nowrap justify-center gap-1 overflow-x-auto pb-1 [scrollbar-width:thin]">
           {emotionTabs.map((tab) => {
             const isActive = emotion === tab.id;
             return (
               <button
                 key={tab.id}
                 onClick={() => setEmotion(tab.id)}
-                className={`relative px-5 py-2.5 rounded-full font-medium transition-all duration-300 flex items-center gap-2 shadow-sm
+                className={`relative shrink-0 px-2.5 py-1.5 rounded-full text-xs font-medium transition-all duration-300 flex items-center gap-1 shadow-sm
                   ${isActive 
                     ? 'text-white' 
                     : 'bg-slate-900/50 text-slate-400 hover:bg-slate-800 hover:text-slate-200 border border-slate-800'}
@@ -452,10 +1037,22 @@ export default function App() {
         </div>
       </div>
 
-      {/* Face Character */}
-      <div className="flex-1 flex items-center justify-center">
-        {/* Container for the bouncy whole-body movements */}
-        <motion.div
+      {/* Face + optional flashcard */}
+      <div className="flex flex-1 w-full items-center justify-center px-3 md:px-6 pb-6">
+        <div
+          className={
+            wordFlashcard
+              ? "flex w-full max-w-6xl flex-col items-center justify-center gap-8 md:flex-row md:items-center md:justify-between md:gap-6"
+              : "flex w-full justify-center"
+          }
+        >
+          <div
+            className={`flex justify-center transition-transform duration-300 ease-out ${
+              wordFlashcard ? "origin-center scale-[0.82] md:scale-[0.72] md:-translate-x-2" : ""
+            }`}
+          >
+            {/* Container for the bouncy whole-body movements */}
+            <motion.div
           variants={faceContainerVariants}
           initial="neutral"
           animate={emotion}
@@ -463,81 +1060,118 @@ export default function App() {
         >
           {/* Glowing Spirit Face Base (Blurred for flowing edges) */}
           <motion.div
-            animate={{ 
+            animate={{
               borderRadius: [
                 "55% 45% 40% 60% / 60% 45% 55% 40%",
                 "45% 55% 50% 50% / 50% 55% 45% 50%",
-                "55% 45% 40% 60% / 60% 45% 55% 40%"
+                "55% 45% 40% 60% / 60% 45% 55% 40%",
               ],
-              boxShadow: [
-                `0 0 50px 10px ${faceColors[emotion]}66`,
-                `0 0 80px 20px ${faceColors[emotion]}aa`,
-                `0 0 50px 10px ${faceColors[emotion]}66`
-              ]
+              boxShadow: spiritReplyBg
+                ? [
+                    `0 0 72px 16px ${faceColors[emotion]}77`,
+                    `0 0 118px 32px ${faceColors[emotion]}cc`,
+                    `0 0 72px 16px ${faceColors[emotion]}77`,
+                  ]
+                : [
+                    `0 0 50px 10px ${faceColors[emotion]}66`,
+                    `0 0 80px 20px ${faceColors[emotion]}aa`,
+                    `0 0 50px 10px ${faceColors[emotion]}66`,
+                  ],
             }}
-            transition={{ duration: 6, repeat: Infinity, ease: "easeInOut" }}
+            transition={{ duration: spiritReplyBg ? 3.2 : 6, repeat: Infinity, ease: "easeInOut" }}
             className="absolute inset-0 overflow-hidden"
-            style={{ filter: "blur(12px)" }}
+            style={{ filter: spiritReplyBg ? "blur(14px)" : "blur(12px)" }}
           >
             {/* Soft Ambient Blobs */}
             {/* Base white-ish background */}
             <div className="absolute inset-0 bg-[#f8fafc] z-0" />
 
             {/* Emotion-driven flowing Blob */}
-            <motion.div 
-              animate={{ 
-                x: ['-20%', '10%', '-20%'], 
-                y: ['-10%', '20%', '-10%'],
-                scale: [1, 1.2, 1],
-                rotate: [0, 90, 0],
-                background: `radial-gradient(circle, ${faceColors[emotion]} 0%, transparent 70%)`
+            <motion.div
+              animate={{
+                x: spiritReplyBg ? ["-32%", "18%", "-32%"] : ["-20%", "10%", "-20%"],
+                y: spiritReplyBg ? ["-16%", "28%", "-16%"] : ["-10%", "20%", "-10%"],
+                scale: spiritReplyBg ? [1.05, 1.52, 1.05] : [1, 1.2, 1],
+                rotate: spiritReplyBg ? [0, 110, 0] : [0, 90, 0],
+                background: `radial-gradient(circle, ${faceColors[emotion]} 0%, transparent 70%)`,
               }}
-              transition={{ 
-                x: { duration: 10, repeat: Infinity, ease: "easeInOut" },
-                y: { duration: 10, repeat: Infinity, ease: "easeInOut" },
-                scale: { duration: 10, repeat: Infinity, ease: "easeInOut" },
-                rotate: { duration: 10, repeat: Infinity, ease: "easeInOut" },
-                background: { duration: 0.8 }
+              transition={{
+                x: { duration: spiritReplyBg ? 4.8 : 10, repeat: Infinity, ease: "easeInOut" },
+                y: { duration: spiritReplyBg ? 4.8 : 10, repeat: Infinity, ease: "easeInOut" },
+                scale: { duration: spiritReplyBg ? 4.8 : 10, repeat: Infinity, ease: "easeInOut" },
+                rotate: { duration: spiritReplyBg ? 4.8 : 10, repeat: Infinity, ease: "easeInOut" },
+                background: { duration: 0.8 },
               }}
-              className="absolute w-[150%] h-[150%] top-[-20%] left-[-20%] opacity-90 blur-2xl rounded-full z-0"
+              className={
+                spiritReplyBg
+                  ? "absolute w-[185%] h-[185%] top-[-26%] left-[-26%] opacity-95 blur-2xl rounded-full z-0"
+                  : "absolute w-[150%] h-[150%] top-[-20%] left-[-20%] opacity-90 blur-2xl rounded-full z-0"
+              }
             />
 
             {/* Flowing Green Blob (constant element like a sprite) */}
-            <motion.div 
-              animate={{ 
-                x: ['10%', '-20%', '10%'], 
-                y: ['10%', '-15%', '10%'],
-                scale: [1, 1.3, 1],
-                rotate: [0, -90, 0]
+            <motion.div
+              animate={{
+                x: spiritReplyBg ? ["14%", "-28%", "14%"] : ["10%", "-20%", "10%"],
+                y: spiritReplyBg ? ["14%", "-22%", "14%"] : ["10%", "-15%", "10%"],
+                scale: spiritReplyBg ? [1.05, 1.48, 1.05] : [1, 1.3, 1],
+                rotate: spiritReplyBg ? [0, -110, 0] : [0, -90, 0],
               }}
-              transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
-              className="absolute w-[120%] h-[120%] top-[0%] left-[10%] opacity-70 blur-2xl rounded-full z-0"
-              style={{ background: 'radial-gradient(circle, #bbf7d0 0%, transparent 70%)' }}
+              transition={{ duration: spiritReplyBg ? 5.5 : 12, repeat: Infinity, ease: "easeInOut" }}
+              className={
+                spiritReplyBg
+                  ? "absolute w-[158%] h-[158%] top-[-4%] left-[6%] opacity-80 blur-2xl rounded-full z-0"
+                  : "absolute w-[120%] h-[120%] top-[0%] left-[10%] opacity-70 blur-2xl rounded-full z-0"
+              }
+              style={{ background: "radial-gradient(circle, #bbf7d0 0%, transparent 70%)" }}
             />
 
             {/* Small floating white highlights */}
             <motion.div
-              animate={{ opacity: [0.3, 0.8, 0.3], scale: [1, 1.5, 1], x: [0, 20, 0], y: [0, -20, 0] }}
-              transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-              className="absolute w-20 h-20 bg-white rounded-full blur-xl top-[10%] left-[20%] z-0"
+              animate={{
+                opacity: spiritReplyBg ? [0.35, 0.95, 0.35] : [0.3, 0.8, 0.3],
+                scale: spiritReplyBg ? [1, 1.85, 1] : [1, 1.5, 1],
+                x: spiritReplyBg ? [0, 28, 0] : [0, 20, 0],
+                y: spiritReplyBg ? [0, -28, 0] : [0, -20, 0],
+              }}
+              transition={{ duration: spiritReplyBg ? 2.4 : 4, repeat: Infinity, ease: "easeInOut" }}
+              className={
+                spiritReplyBg
+                  ? "absolute w-24 h-24 bg-white rounded-full blur-xl top-[8%] left-[18%] z-0"
+                  : "absolute w-20 h-20 bg-white rounded-full blur-xl top-[10%] left-[20%] z-0"
+              }
             />
             <motion.div
-              animate={{ opacity: [0.2, 0.6, 0.2], scale: [1, 1.2, 1], x: [0, -15, 0], y: [0, 15, 0] }}
-              transition={{ duration: 5, repeat: Infinity, ease: "easeInOut", delay: 1 }}
-              className="absolute w-24 h-24 bg-white rounded-full blur-xl bottom-[20%] right-[10%] z-0"
+              animate={{
+                opacity: spiritReplyBg ? [0.25, 0.75, 0.25] : [0.2, 0.6, 0.2],
+                scale: spiritReplyBg ? [1, 1.55, 1] : [1, 1.2, 1],
+                x: spiritReplyBg ? [0, -22, 0] : [0, -15, 0],
+                y: spiritReplyBg ? [0, 22, 0] : [0, 15, 0],
+              }}
+              transition={{
+                duration: spiritReplyBg ? 2.9 : 5,
+                repeat: Infinity,
+                ease: "easeInOut",
+                delay: spiritReplyBg ? 0.35 : 1,
+              }}
+              className={
+                spiritReplyBg
+                  ? "absolute w-28 h-28 bg-white rounded-full blur-xl bottom-[18%] right-[8%] z-0"
+                  : "absolute w-24 h-24 bg-white rounded-full blur-xl bottom-[20%] right-[10%] z-0"
+              }
             />
           </motion.div>
 
           {/* Clearer Boundary / Core Overlay (The "Membrane") */}
           <motion.div
-            animate={{ 
+            animate={{
               borderRadius: [
                 "55% 45% 40% 60% / 60% 45% 55% 40%",
                 "45% 55% 50% 50% / 50% 55% 45% 50%",
-                "55% 45% 40% 60% / 60% 45% 55% 40%"
-              ]
+                "55% 45% 40% 60% / 60% 45% 55% 40%",
+              ],
             }}
-            transition={{ duration: 6, repeat: Infinity, ease: "easeInOut" }}
+            transition={{ duration: spiritReplyBg ? 3.4 : 6, repeat: Infinity, ease: "easeInOut" }}
             className="absolute inset-[4%] z-0 border-[1.5px] border-white/50 backdrop-blur-[1px]"
             style={{
               background: "radial-gradient(circle at 35% 35%, rgba(255,255,255,0.3) 0%, rgba(255,255,255,0.05) 50%, transparent 80%)",
@@ -724,6 +1358,17 @@ export default function App() {
           >
             {isCameraOn ? <Camera size={24} /> : <CameraOff size={24} />}
           </button>
+
+          {isCameraOn && isMicOn && (
+            <button
+              type="button"
+              onClick={() => runVisionManualRef.current?.()}
+              className="p-3 rounded-full shadow-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors flex items-center justify-center"
+              title="拍一张当前画面给 AI（也可直接说「看一下」「能看见我吗」等触发，按需计费）"
+            >
+              <Eye size={22} />
+            </button>
+          )}
 
           <button
             onClick={() => setIsMicOn(!isMicOn)}
