@@ -1317,8 +1317,7 @@ export default function App() {
       {/* Header & Controls */}
       <div className="max-w-4xl w-full flex flex-col items-center space-y-4 mb-8 md:mb-10 z-10 relative px-1">
         <div className="text-center space-y-2">
-          <h1 className="text-4xl font-bold text-slate-100 tracking-tight">灵动表情</h1>
-          <p className="text-slate-400 text-sm md:text-lg">点击下方标签，观察情绪的流动与生长 ✨</p>
+          <h1 className="text-4xl font-bold text-slate-100 tracking-tight">Luumi</h1>
         </div>
 
         {/* Tags / Tabs — 单行可横向滚动 */}
