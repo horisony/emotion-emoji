@@ -1,8 +1,20 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import { extractToolCalls, extractToolCallsWide } from './features/realtime/toolCalls';
-import { WordFlashCard } from './features/flashcard/WordFlashCard';
 import type { WordFlashcardPayload } from './features/flashcard/types';
+import { LearningModeTabs } from './features/studyModes/LearningModeTabs';
+import { RightStudyPanel } from './features/studyModes/RightStudyPanel';
+import type { StudyModeId, StudyPanelPayload } from './features/studyModes/types';
+import { STUDY_TOOL_NAMES } from './features/studyModes/registry';
+import {
+  requestStudyModeFocus,
+  sendStudyPanelUiToRealtimeConversation,
+} from './features/studyModes/modeSync';
+import {
+  parseDialogueSceneArgs,
+  parseLongPhraseCardArgs,
+  parseShortPhraseCardArgs,
+} from './features/studyModes/parseStudyPayloads';
 import { FLASHCARD_ORAL_PACING_RULE_ZH } from './features/flashcard/oralPacing';
 import { argsJsonLooksStreamIncomplete, parseWordFlashcardPayload } from './features/flashcard/parsePayload';
 import { heuristicFlashcardFromUserChinese } from './features/flashcard/heuristicFromSpeech';
@@ -392,13 +404,22 @@ export default function App() {
   const [isMicOn, setIsMicOn] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [transcript, setTranscript] = useState("");
-  const [wordFlashcard, setWordFlashcard] = useState<WordFlashcardPayload | null>(null);
+  const [activeStudyMode, setActiveStudyMode] = useState<StudyModeId | null>(null);
+  const [studyPanelData, setStudyPanelData] = useState<StudyPanelPayload | null>(null);
+  const studyPanelDataRef = React.useRef<StudyPanelPayload | null>(null);
+  studyPanelDataRef.current = studyPanelData;
+  const activeStudyModeRef = React.useRef<StudyModeId | null>(null);
+  activeStudyModeRef.current = activeStudyMode;
+
+  const wordFlashcard = studyPanelData?.mode === 'flashcard' ? studyPanelData.data : null;
   const wordFlashcardRef = React.useRef<WordFlashcardPayload | null>(null);
   wordFlashcardRef.current = wordFlashcard;
   /** 已向 Realtime 会话注入过的闪卡 UI 状态键，避免重复 item */
   const lastFlashcardUiSyncKeyRef = React.useRef<string | null>(null);
   /** 已为该卡内容触发过「自动朗读」请求，避免 idle 重复刷 response.create */
   const lastFlashcardAutoReadKeyRef = React.useRef<string | null>(null);
+  /** 非闪卡学习面板注入会话的去重键 */
+  const lastStudyNonFlashUiSyncKeyRef = React.useRef<string | null>(null);
   /** 是否曾在本轮开麦周期内向模型同步过「有卡」状态（用于判断是否要在收起时发关闭说明） */
   const hadOpenFlashcardThisMicRef = React.useRef(false);
   const [systemState, setSystemState] = useState<"connecting" | "idle" | "listening" | "thinking" | "speaking" | "error">("idle");
@@ -411,6 +432,16 @@ export default function App() {
     if (!ws || ws.readyState !== WebSocket.OPEN || !card) return;
     requestFlashcardReadAgainTwice(ws, card);
   }, []);
+
+  const handleStudyTabSelect = useCallback((mode: StudyModeId) => {
+    setActiveStudyMode(mode);
+    setStudyPanelData(null);
+    lastStudyNonFlashUiSyncKeyRef.current = null;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      requestStudyModeFocus(ws, mode);
+    }
+  }, []);
   const isCameraOnRef = React.useRef(false);
   const lastVisionAtRef = React.useRef(0);
   /** 最近一次成功识图的文案与时间戳；关摄像头时清空，避免答非所问 */
@@ -422,8 +453,10 @@ export default function App() {
   const lastFlashcardNudgeUtteranceRef = React.useRef<string | null>(null);
   /** 本轮 response 内是否已成功解析并展示过闪卡工具 */
   const flashcardToolSucceededThisResponseRef = React.useRef(false);
-  /** URL `?debug=flashcard` 或 localStorage FLASHCARD_DEBUG：右下角调试板 + 记录 WS 事件类型 */
+  /** URL `?debug=flashcard` / `?debug=study` 或 localStorage FLASHCARD_DEBUG：右下角调试板 + 记录 WS 事件类型 */
   const [flashcardDebugUi, setFlashcardDebugUi] = useState(false);
+  /** URL `?debug=emotion`：显示手动情绪 Tab（默认隐藏） */
+  const [showEmotionDebugTabs, setShowEmotionDebugTabs] = useState(false);
   const [wsDebugRing, setWsDebugRing] = useState<string[]>([]);
   const flashcardDebugUiRef = React.useRef(false);
   flashcardDebugUiRef.current = flashcardDebugUi;
@@ -431,25 +464,30 @@ export default function App() {
   useEffect(() => {
     try {
       const sp = new URLSearchParams(window.location.search);
-      if (sp.get("debug") === "flashcard") {
+      if (sp.get("debug") === "flashcard" || sp.get("debug") === "study") {
         localStorage.setItem("FLASHCARD_DEBUG", "1");
         setFlashcardDebugUi(true);
       } else if (localStorage.getItem("FLASHCARD_DEBUG") === "1") {
         setFlashcardDebugUi(true);
+      }
+      if (sp.get("debug") === "emotion") {
+        setShowEmotionDebugTabs(true);
       }
     } catch {
       /* ignore */
     }
   }, []);
 
-  /** 关麦时清闪卡；不要在每次 WS onopen 清（重连 / StrictMode 会误清导致永远看不到卡） */
+  /** 关麦时清学习面板与 Tab；不要在每次 WS onopen 清（重连 / StrictMode 会误清导致永远看不到卡） */
   useEffect(() => {
     if (!isMicOn) {
-      setWordFlashcard(null);
+      setStudyPanelData(null);
+      setActiveStudyMode(null);
       lastFlashcardNudgeUtteranceRef.current = null;
       lastFlashcardUiSyncKeyRef.current = null;
       lastFlashcardAutoReadKeyRef.current = null;
       hadOpenFlashcardThisMicRef.current = false;
+      lastStudyNonFlashUiSyncKeyRef.current = null;
     }
   }, [isMicOn]);
 
@@ -492,6 +530,19 @@ export default function App() {
     requestFlashcardReadAloud(socket, wordFlashcard);
     flashcardLog("read_aloud.trigger", { key: key.slice(0, 72) });
   }, [wordFlashcard, isMicOn, systemState]);
+
+  /** 短句/长句/场景对话：把右侧内容同步给 Realtime（闪卡仍用 flashcard uiSync） */
+  useEffect(() => {
+    if (!isMicOn) return;
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const p = studyPanelData;
+    if (!p || p.mode === "flashcard") return;
+    const key = `${p.mode}:${JSON.stringify(p.data)}`;
+    if (lastStudyNonFlashUiSyncKeyRef.current === key) return;
+    lastStudyNonFlashUiSyncKeyRef.current = key;
+    sendStudyPanelUiToRealtimeConversation(socket, p);
+  }, [studyPanelData, isMicOn]);
 
   React.useEffect(() => {
     isCameraOnRef.current = isCameraOn;
@@ -685,7 +736,8 @@ export default function App() {
             flashcardLog("fulfil.ok", { callId, word: payload.primary_text });
             lastFlashcardNudgeUtteranceRef.current = null;
             flashcardToolSucceededThisResponseRef.current = true;
-            setWordFlashcard(payload);
+            setActiveStudyMode("flashcard");
+            setStudyPanelData({ mode: "flashcard", data: payload });
             sendFlashcardToolResult(
               callId,
               JSON.stringify({
@@ -711,12 +763,78 @@ export default function App() {
           }
         };
 
-        const fulfilFlashcardToolsFromEvent = (evt: {
+        const tryShortPhraseToolCall = (callId: string, argumentsStr: string) => {
+          if (!callId) return;
+          const t = argumentsStr.trim();
+          if (t.length < 5 || t === "{}") return;
+          if (fulfilledToolCallIdsRef.current.has(callId)) return;
+          const payload = parseShortPhraseCardArgs(argumentsStr);
+          if (payload) {
+            fulfilledToolCallIdsRef.current.add(callId);
+            setActiveStudyMode("short_phrase");
+            setStudyPanelData({ mode: "short_phrase", data: payload });
+            sendFlashcardToolResult(callId, JSON.stringify({ ok: true, displayed: true }));
+          } else if (argsJsonLooksStreamIncomplete(t)) {
+            visionLog("short_phrase.fulfil.incomplete_args_wait", { callId, len: t.length });
+          } else {
+            fulfilledToolCallIdsRef.current.add(callId);
+            sendFlashcardToolResult(callId, JSON.stringify({ ok: false, error: "invalid_short_phrase_args" }));
+          }
+        };
+
+        const tryLongPhraseToolCall = (callId: string, argumentsStr: string) => {
+          if (!callId) return;
+          const t = argumentsStr.trim();
+          if (t.length < 5 || t === "{}") return;
+          if (fulfilledToolCallIdsRef.current.has(callId)) return;
+          const payload = parseLongPhraseCardArgs(argumentsStr);
+          if (payload) {
+            fulfilledToolCallIdsRef.current.add(callId);
+            setActiveStudyMode("long_phrase");
+            setStudyPanelData({ mode: "long_phrase", data: payload });
+            sendFlashcardToolResult(callId, JSON.stringify({ ok: true, displayed: true }));
+          } else if (argsJsonLooksStreamIncomplete(t)) {
+            visionLog("long_phrase.fulfil.incomplete_args_wait", { callId, len: t.length });
+          } else {
+            fulfilledToolCallIdsRef.current.add(callId);
+            sendFlashcardToolResult(callId, JSON.stringify({ ok: false, error: "invalid_long_phrase_args" }));
+          }
+        };
+
+        const tryDialogueSceneToolCall = (callId: string, argumentsStr: string) => {
+          if (!callId) return;
+          const t = argumentsStr.trim();
+          if (t.length < 5 || t === "{}") return;
+          if (fulfilledToolCallIdsRef.current.has(callId)) return;
+          const payload = parseDialogueSceneArgs(argumentsStr);
+          if (payload) {
+            fulfilledToolCallIdsRef.current.add(callId);
+            setActiveStudyMode("dialogue");
+            setStudyPanelData({ mode: "dialogue", data: payload });
+            sendFlashcardToolResult(callId, JSON.stringify({ ok: true, displayed: true }));
+          } else if (argsJsonLooksStreamIncomplete(t)) {
+            visionLog("dialogue.fulfil.incomplete_args_wait", { callId, len: t.length });
+          } else {
+            fulfilledToolCallIdsRef.current.add(callId);
+            sendFlashcardToolResult(callId, JSON.stringify({ ok: false, error: "invalid_dialogue_args" }));
+          }
+        };
+
+        const fulfilAllStudyToolsFromEvent = (evt: {
           response?: { output?: Array<Record<string, unknown>> };
           item?: Record<string, unknown>;
         }) => {
           for (const { callId, arguments: argStr } of extractToolCallsWide(evt, "show_word_flashcard")) {
             tryFlashcardToolCall(callId, argStr);
+          }
+          for (const { callId, arguments: argStr } of extractToolCallsWide(evt, STUDY_TOOL_NAMES.short_phrase)) {
+            tryShortPhraseToolCall(callId, argStr);
+          }
+          for (const { callId, arguments: argStr } of extractToolCallsWide(evt, STUDY_TOOL_NAMES.long_phrase)) {
+            tryLongPhraseToolCall(callId, argStr);
+          }
+          for (const { callId, arguments: argStr } of extractToolCallsWide(evt, STUDY_TOOL_NAMES.dialogue)) {
+            tryDialogueSceneToolCall(callId, argStr);
           }
         };
 
@@ -1024,7 +1142,8 @@ export default function App() {
                 if (pulled && !flashcardToolSucceededThisResponseRef.current) {
                   visionLog("flashcard.from_transcript", { word: pulled.primary_text });
                   flashcardLog("from_transcript.delta", { word: pulled.primary_text });
-                  setWordFlashcard(pulled);
+                  setActiveStudyMode("flashcard");
+                  setStudyPanelData({ mode: "flashcard", data: pulled });
                 }
                 const line = clean.trim();
                 setTranscript(line ? "回复: " + line : "回复中…");
@@ -1050,6 +1169,12 @@ export default function App() {
               flashcardLog("ws.function_call_arguments.done", { name, callId, argsLen: args.length });
               if (name === "show_word_flashcard" && callId) {
                 tryFlashcardToolCall(callId, args);
+              } else if (name === STUDY_TOOL_NAMES.short_phrase && callId) {
+                tryShortPhraseToolCall(callId, args);
+              } else if (name === STUDY_TOOL_NAMES.long_phrase && callId) {
+                tryLongPhraseToolCall(callId, args);
+              } else if (name === STUDY_TOOL_NAMES.dialogue && callId) {
+                tryDialogueSceneToolCall(callId, args);
               } else if (name === "look_at_camera" && callId) {
                 void tryVisionPipeline("tool", callId);
               }
@@ -1073,7 +1198,7 @@ export default function App() {
               for (const { callId } of cam) {
                 void tryVisionPipeline("tool", callId);
               }
-              fulfilFlashcardToolsFromEvent({ item });
+              fulfilAllStudyToolsFromEvent({ item });
               break;
             }
             case 'response.output_item.added': {
@@ -1083,7 +1208,7 @@ export default function App() {
                 itemName: item?.name,
                 itemKeys: item ? Object.keys(item) : [],
               });
-              fulfilFlashcardToolsFromEvent({ item });
+              fulfilAllStudyToolsFromEvent({ item });
               break;
             }
             case 'response.output_item.done': {
@@ -1103,7 +1228,7 @@ export default function App() {
               for (const { callId } of calls) {
                 void tryVisionPipeline("tool", callId);
               }
-              fulfilFlashcardToolsFromEvent({ item: event.item as Record<string, unknown> });
+              fulfilAllStudyToolsFromEvent({ item: event.item as Record<string, unknown> });
               break;
             }
             case 'conversation.item.input_audio_transcription.completed': {
@@ -1178,7 +1303,7 @@ export default function App() {
                 seen.add(callId);
                 void tryVisionPipeline("tool", callId);
               }
-              fulfilFlashcardToolsFromEvent(event);
+              fulfilAllStudyToolsFromEvent(event);
               const fcScan = extractToolCallsWide(event, "show_word_flashcard");
               flashcardLog("response.done.flashcard_wide_scan", { count: fcScan.length });
               const fin = scrubTranscriptAndPullFlashcard(fullTranscript);
@@ -1189,14 +1314,16 @@ export default function App() {
               } else if (fin.pulled) {
                 visionLog("flashcard.from_transcript.final", { word: fin.pulled.primary_text });
                 flashcardLog("from_transcript.response_done", { word: fin.pulled.primary_text });
-                setWordFlashcard(fin.pulled);
+                setActiveStudyMode("flashcard");
+                setStudyPanelData({ mode: "flashcard", data: fin.pulled });
                 lastFlashcardNudgeUtteranceRef.current = null;
               } else if (lastFlashcardNudgeUtteranceRef.current) {
                 const src = lastFlashcardNudgeUtteranceRef.current;
                 const guess = heuristicFlashcardFromUserChinese(src);
                 if (guess) {
                   flashcardLog("fallback.heuristic_card", guess);
-                  setWordFlashcard(guess);
+                  setActiveStudyMode("flashcard");
+                  setStudyPanelData({ mode: "flashcard", data: guess });
                 } else {
                   flashcardLog("fallback.heuristic_skip", { src: src.slice(0, 80) });
                 }
@@ -1292,6 +1419,7 @@ export default function App() {
 
   /** 语音回复中（replying）：精灵头内层光晕与色块流动更快、幅度更大，五官仍同平静 */
   const spiritReplyBg = emotion === "replying";
+  const studyLayoutSplit = activeStudyMode !== null;
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center font-sans py-16 px-4 relative w-full overflow-x-auto overflow-y-auto">
@@ -1320,7 +1448,7 @@ export default function App() {
           <h1 className="text-4xl font-bold text-slate-100 tracking-tight">Luumi</h1>
         </div>
 
-        {/* Tags / Tabs — 单行可横向滚动 */}
+        {showEmotionDebugTabs ? (
         <div className="flex w-full max-w-full flex-nowrap justify-center gap-1 overflow-x-auto pb-1 [scrollbar-width:thin]">
           {emotionTabs.map((tab) => {
             const isActive = emotion === tab.id;
@@ -1349,20 +1477,22 @@ export default function App() {
             );
           })}
         </div>
+        ) : null}
+        <LearningModeTabs activeMode={activeStudyMode} onSelect={handleStudyTabSelect} />
       </div>
 
-      {/* Face + optional flashcard：self-stretch 打破父级 items-center，否则行宽塌缩、右侧闪卡被 overflow 裁掉 */}
+      {/* Face + 学习模式右栏 */}
       <div className="relative z-10 flex min-h-0 flex-1 w-full max-w-full self-stretch flex-col items-center justify-center px-2 sm:px-4 md:px-6 pb-6">
         <div
           className={
-            wordFlashcard
+            studyLayoutSplit
               ? "grid w-full max-w-6xl mx-auto grid-cols-1 items-center gap-6 md:grid-cols-2 md:gap-6 lg:gap-8"
               : "flex w-full justify-center"
           }
         >
           <div
             className={`flex w-full shrink-0 justify-center overflow-visible transition-transform duration-300 ease-out will-change-transform ${
-              wordFlashcard
+              studyLayoutSplit
                 ? "md:justify-end md:pr-2 scale-[0.66] translate-x-2 md:scale-[0.7] md:translate-x-4 lg:translate-x-6"
                 : "scale-90 translate-x-0"
             }`}
@@ -1645,32 +1775,36 @@ export default function App() {
             </motion.div>
           </div>
 
-          {wordFlashcard ? (
-            <div className="relative z-30 flex w-full min-w-0 shrink-0 justify-center sm:max-w-md md:justify-start md:pl-2 md:max-w-none">
-              <AnimatePresence mode="wait">
-                <WordFlashCard
-                  key={`${wordFlashcard.primary_text}-${wordFlashcard.secondary_text}`}
-                  {...wordFlashcard}
-                  onDismiss={() => setWordFlashcard(null)}
-                  onReadAloud={readFlashcardAgain}
-                  readAloudDisabled={!isMicOn}
-                />
-              </AnimatePresence>
-            </div>
-          ) : null}
+          <RightStudyPanel
+            activeMode={activeStudyMode}
+            panel={studyPanelData}
+            isMicOn={isMicOn}
+            onDismissFlashcard={() =>
+              setStudyPanelData((prev) => (prev?.mode === "flashcard" ? null : prev))
+            }
+            onReadFlashcardAgain={readFlashcardAgain}
+            onClearNonFlashcard={() => {
+              setStudyPanelData(null);
+              lastStudyNonFlashUiSyncKeyRef.current = null;
+            }}
+          />
         </div>
       </div>
 
       {flashcardDebugUi && (
         <div className="fixed top-20 right-3 z-[100] w-[min(22rem,calc(100vw-1.5rem))] max-h-[55vh] overflow-hidden rounded-xl border border-emerald-500/40 bg-slate-950/95 text-left shadow-2xl backdrop-blur-md">
           <div className="border-b border-white/10 px-3 py-2 text-[11px] font-semibold text-emerald-300">
-            闪卡调试 <span className="font-normal text-slate-500">(?debug=flashcard)</span>
+            学习 / 闪卡调试 <span className="font-normal text-slate-500">(?debug=study)</span>
           </div>
           <div className="max-h-[42vh] overflow-y-auto px-3 py-2 font-mono text-[10px] leading-snug text-slate-300 space-y-2">
             <div>
-              <span className="text-slate-500">wordFlashcard:</span>{" "}
+              <span className="text-slate-500">activeStudyMode:</span>{" "}
+              <span className="break-all text-cyan-200/95">{activeStudyMode ?? "null"}</span>
+            </div>
+            <div>
+              <span className="text-slate-500">studyPanelData:</span>{" "}
               <span className="break-all text-amber-200/95">
-                {wordFlashcard ? JSON.stringify(wordFlashcard) : "null"}
+                {studyPanelData ? JSON.stringify(studyPanelData) : "null"}
               </span>
             </div>
             <div>
@@ -1693,14 +1827,18 @@ export default function App() {
             <button
               type="button"
               className="rounded-lg bg-emerald-600 px-2 py-1 text-[10px] text-white hover:bg-emerald-500"
-              onClick={() =>
-                setWordFlashcard({
-                  primary_text: "debug",
-                  secondary_text: "若能看到此卡，说明 UI 正常，问题在 WS/工具链",
-                  primary_lang: "en",
-                  secondary_lang: "zh",
-                })
-              }
+              onClick={() => {
+                setActiveStudyMode("flashcard");
+                setStudyPanelData({
+                  mode: "flashcard",
+                  data: {
+                    primary_text: "debug",
+                    secondary_text: "若能看到此卡，说明 UI 正常，问题在 WS/工具链",
+                    primary_lang: "en",
+                    secondary_lang: "zh",
+                  },
+                });
+              }}
             >
               注入测试闪卡
             </button>

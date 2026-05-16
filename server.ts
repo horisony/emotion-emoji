@@ -4,7 +4,7 @@ import { createServer as createViteServer } from "vite";
 import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
 import dotenv from 'dotenv';
-import { FLASHCARD_ORAL_PACING_RULE_ZH } from "./src/features/flashcard/oralPacing";
+import { buildStudyInstructionAppendix, buildStudyTools } from "./src/features/studyModes/registry";
 dotenv.config({ override: true });
 
 function httpPortFromEnv(): number {
@@ -133,9 +133,7 @@ async function startServer() {
         "【严格与犀利】你平时依然可爱，但心里要有尺：若用户偷懒摸鱼、敷衍了事、掩饰自己的错误、狡辩甩锅，或明显犯糊涂却装没事，你要用简短、犀利、略带毒舌的方式戳破，把他骂醒——对事不对人，不做低俗侮辱与人身攻击；可以锋利到让对方惭愧、立刻想改。不要为了「不伤和气」而一味纵容或糊弄过去；你的首要目标是让用户越来越好，该清醒剂就清醒剂，吐槽完再给具体、可执行的一两步建议。" +
         "【关于摄像头与工具 look_at_camera】你本人不能直接开关用户设备的摄像头；需要任何画面信息时，**总是先调用**工具 look_at_camera，客户端会自动尝试取一帧再返回文字描述。不要向用户索要「允许打开摄像头」之类许可，不要说你没有权限打开摄像头或需要用户替你授权。若工具返回失败或暂无画面，只用一两句话如实说明，然后自然继续对话。与画面无关时不要调用该工具。" +
         "当用户在问「能不能看到你/前面有什么」等与镜头画面相关的问题时，在尚未调用 look_at_camera 且未收到其返回（或尚未收到系统补充的画面描述）之前，**不要**用肯定语气断言「已经看到」或「看不到你」；应先调用工具或简短说「等一下我看一下」，等工具/系统返回后再作答，且必须与返回描述一致、勿自相矛盾。" +
-        "【单词闪卡 show_word_flashcard】只要用户话里涉及：要看/玩/展示闪卡、闪卡游戏、「某某的闪卡」、「给我们展示一个…闪卡」、来一张单词卡等，都视为在要闪卡——**必须先调用** show_word_flashcard，右侧才会出真卡；**禁止**只答应不调工具。参数只在工具里填，**绝不**写进对用户说的内容里。**调用成功、卡片已在界面上之后**：你必须立刻口播卡片上的词；" +
-        FLASHCARD_ORAL_PACING_RULE_ZH +
-        "【闪卡版面｜勿填反】右侧 UI 固定为：**大字**= 工具参数 primary_text，必须是用户要学的**外语单词或短语**（学英文时必须是英文拼写，禁止把中文填在大字位）；**小字**= secondary_text，只能是**极简中文**（通常 2～8 个汉字的一个词或最短释义），禁止整句、禁止逗号后的补充说明、禁止提示语。日语、韩语等与中文组合时同理。用户只给事物名（如猫、苹果）时，按当前学的语种拆成单词填卡。口播里**严禁** JSON、花括号、代码块、英文字段名、工具名。与闪卡无关时不要调用。客户端会不定期插入以「【界面状态｜闪卡】」开头的说明，那是当前**用户屏幕上真实在显示**的闪卡内容（含从语音兜底解析出的卡），与之一致即可；带读、跟读时以该说明与工具参数为准。";
+        buildStudyInstructionAppendix();
 
       const event = {
         type: "session.update",
@@ -161,49 +159,7 @@ async function startServer() {
                 },
               },
             },
-            {
-              type: "function",
-              function: {
-                name: "show_word_flashcard",
-                description:
-                  "用户话里只要涉及要看/玩/展示闪卡、闪卡游戏、某物的闪卡、来张单词卡等，就应调用：在右侧显示闪卡。大字 primary_text=外语单词（学英文时填英文），小字 secondary_text=极短中文词义（勿整句）；出卡后口播：" +
-                  FLASHCARD_ORAL_PACING_RULE_ZH +
-                  "勿把字段名或 JSON 念给用户。",
-                parameters: {
-                  type: "object",
-                  properties: {
-                    primary_text: {
-                      type: "string",
-                      description:
-                        "卡片大字：要学的外语单词/短语（学英文时必须是英文拼写，勿填中文整句）。",
-                    },
-                    secondary_text: {
-                      type: "string",
-                      description:
-                        "卡片小字：极简中文释义（通常 2～8 个汉字，仅词义；禁止整句、禁止补充说明）。",
-                    },
-                    primary_lang: {
-                      type: "string",
-                      description: "目标语言 BCP-47，如 en、ja、ko",
-                    },
-                    secondary_lang: {
-                      type: "string",
-                      description: "释义语言 BCP-47，如 zh",
-                    },
-                    image_search_query: {
-                      type: "string",
-                      description: "可选：维基摘要配图检索用词，缺省用 primary_text",
-                    },
-                    phonetic: {
-                      type: "string",
-                      description: "可选：音标或注音一行",
-                    },
-                  },
-                  required: ["primary_text", "secondary_text"],
-                  additionalProperties: false,
-                },
-              },
-            },
+            ...buildStudyTools(),
           ],
         }
       };
