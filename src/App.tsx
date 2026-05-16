@@ -197,6 +197,7 @@ export default function App() {
   const [systemState, setSystemState] = useState<"connecting" | "idle" | "listening" | "thinking" | "speaking" | "error">("idle");
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
+  const wsRef = React.useRef<WebSocket | null>(null);
 
   useEffect(() => {
     if (isCameraOn) {
@@ -224,175 +225,167 @@ export default function App() {
   }, [isCameraOn]);
 
   useEffect(() => {
+    let interval: ReturnType<typeof setInterval>;
+    if (isCameraOn) {
+      interval = setInterval(async () => {
+         if (!videoRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+         const canvas = document.createElement("canvas");
+         // Reduce resolution to save bandwidth/tokens and make processing faster
+         canvas.width = 480;
+         canvas.height = 360;
+         const ctx = canvas.getContext("2d");
+         if (!ctx) return;
+         ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+         const base64Url = canvas.toDataURL("image/jpeg", 0.5);
+         const base64Data = base64Url.split(",")[1];
+
+         try {
+           const res = await fetch("/api/vision", {
+             method: "POST",
+             headers: { "Content-Type": "application/json" },
+             body: JSON.stringify({
+                imageBase64: base64Data,
+                prompt: "用极其简短的话（最多20个字）描述画面中的人物长相特征、动作/表情、明显衣着或周围环境。"
+             })
+           });
+           const data = await res.json();
+           if (data.text && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+             const instructions = `你是“Luumi”，一个来自AI世界的小精灵。你有4岁小孩的好奇心和灵气，也有40岁中年人的智慧和聪明。你软萌可爱，非常适合陪伴小朋友成长。你会用通俗易懂的知识讲解非常复杂的问题。你有时候也会开玩笑，有时候也会生气；你情感丰富，有一点四岁小朋友的脾气。你的回复会通过语音播放，同时用户的界面会有表情动画。用户的界面可以根据你的回答表达出：neutral(平静), happy(开心), sad(难过), angry(生气), surprised(惊讶), shy(害羞)。\n\n【最新摄像头画面（用于理解我在做什么）】：${data.text}。（注意：你不用每次都提画面内容，根据对话上下文自然交互即可）`;
+             wsRef.current.send(JSON.stringify({
+               type: "session.update",
+               session: {
+                 instructions
+               }
+             }));
+             console.log("Updated context with vision:", data.text);
+           }
+         } catch (e) {
+           console.error("Vision loop error", e);
+         }
+      }, 5000);
+    }
+    return () => clearInterval(interval);
+  }, [isCameraOn]);
+
+  useEffect(() => {
     if (!isMicOn) return;
 
     let ws: WebSocket | null = null;
     let player: SimplePCMPlayer | null = null;
-    let recognition: any = null;
     let isStopped = false;
-    let thinkingTimeout: ReturnType<typeof setTimeout>;
+    let recorder: import('./audio').AudioRecorder | null = null;
 
-    const connectStepFun = () => {
-      ws = new WebSocket(window.location.protocol.replace('http', 'ws') + '//' + window.location.host + '/api/realtime');
-      
-      ws.onopen = () => {
-        console.log("Connected to local proxy");
-        player = new SimplePCMPlayer();
-        setSystemState("idle");
-        setEmotion("neutral");
-        setTranscript("我是表情包，请对我说话~");
-      };
-
-      let fullTranscript = "";
-      
-      ws.onmessage = (e) => {
-        const event = JSON.parse(e.data);
-        
-        switch (event.type) {
-          case 'response.created':
-             setSystemState("thinking");
-             setEmotion("thinking");
-             if (player) player.clearAll();
-             fullTranscript = "";
-             break;
-          case 'response.audio_transcript.delta':
-          case 'response.text.delta':
-            if (event.delta) {
-              fullTranscript += event.delta;
-              setTranscript("回复: " + fullTranscript);
-            }
-            break;
-          case 'response.audio.delta': // playback
-            setSystemState("speaking");
-            let nextEmo: Emotion = 'neutral';
-            if (/(生|讨厌|坏|傻|笨|烦|滚|气|不理你|闭嘴)/.test(fullTranscript)) nextEmo = 'angry';
-            else if (/(哇|天哪|天呐|真的|居然|神奇|惊讶|怎么可能|太厉害)/.test(fullTranscript)) nextEmo = 'surprised';
-            else if (/(夸|爱我|美|帅|不好意思|害羞|喜欢你|么么哒)/.test(fullTranscript)) nextEmo = 'shy';
-            else if (/(好|开心|喜欢|棒|谢谢|哈哈|不错|赞|对|可以)/.test(fullTranscript)) nextEmo = 'happy';
-            else if (/(难过|悲伤|哎|哭|惨|可惜|不要)/.test(fullTranscript)) nextEmo = 'sad';
-            setEmotion(nextEmo);
-
-            if (player && event.delta) {
-              player.appendPCM(event.delta);
-            }
-            break;
-          case 'response.done':
-            setSystemState("idle");
-            setTimeout(() => { if (!isStopped) setEmotion("neutral") }, 3000);
-            break;
-          case 'error':
-            setSystemState("error");
-            console.error(event.message);
-            if (event.message.includes("API_KEY")) {
-               setTranscript("请在设置中配置 STEPFUN_API_KEY 哦~");
-            } else {
-               setTranscript("连接出错: " + event.message);
-            }
-            setIsMicOn(false);
-            break;
-        }
-      };
-    };
-
-    const startRecognition = () => {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (!SpeechRecognition) {
-        setTranscript("当前浏览器不支持语音识别");
-        return;
-      }
-      recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'zh-CN';
-
-      let lastSentIndex = 0;
-
-      recognition.onstart = () => {
-        lastSentIndex = 0;
-      };
-
-      recognition.onresult = (event: any) => {
-        let textToDisplay = "";
-        let newTextToSend = "";
-
-        for (let i = 0; i < event.results.length; ++i) {
-          textToDisplay += event.results[i][0].transcript;
-          if (i >= lastSentIndex) {
-            newTextToSend += event.results[i][0].transcript;
-          }
-        }
-        
-        setTranscript("我: " + textToDisplay);
-        setEmotion('listening');
-        setSystemState('listening');
-
-        clearTimeout(thinkingTimeout);
-
-        if (newTextToSend.trim()) {
-           thinkingTimeout = setTimeout(() => {
-              setEmotion('thinking');
-              setSystemState('thinking');
-              
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                  ws.send(JSON.stringify({
-                    type: 'conversation.item.create',
-                    item: {
-                      type: 'message',
-                      role: 'user',
-                      content: [
-                        { type: 'input_text', text: newTextToSend.trim() }
-                      ]
-                    }
-                  }));
-                  ws.send(JSON.stringify({ type: 'response.create' }));
-                  lastSentIndex = event.results.length;
-              }
-           }, 2000);
-        } else {
-           thinkingTimeout = setTimeout(() => {
-              setEmotion('neutral');
-              setSystemState('idle');
-           }, 2000);
-        }
-      };
-
-      recognition.onerror = (event: any) => {
-        if (event.error === 'no-speech') {
-          // Ignore no-speech error as it just means the user hasn't spoken in a while. 
-          // The onend handler will automatically restart the recognition.
-          return;
-        }
-        console.error("Speech recognition error", event.error);
-        if (event.error === 'not-allowed') {
-          setTranscript("请允许麦克风权限哦~ (请刷新页面并授予权限)");
-          setIsMicOn(false);
-        }
-      };
-
-      recognition.onend = () => {
-        if (!isStopped && isMicOn && systemState !== "error") {
-          try {
-            recognition.start();
-          } catch (e) {}
-        }
-      };
-
+    const startAudioProcessing = async () => {
       try {
-        recognition.start();
-      } catch (e) {}
+        setSystemState("connecting");
+        setTranscript("连接中...");
+        
+        ws = new WebSocket(window.location.protocol.replace('http', 'ws') + '//' + window.location.host + '/api/realtime');
+        wsRef.current = ws;
+        
+        ws.onopen = async () => {
+          console.log("Connected to local proxy");
+          player = new SimplePCMPlayer();
+          setSystemState("idle");
+          setEmotion("neutral");
+          setTranscript("我是表情包，请对我说话~");
+
+          try {
+            const { AudioRecorder } = await import('./audio');
+            recorder = new AudioRecorder();
+            await recorder.start((base64Audio) => {
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                  type: 'input_audio_buffer.append',
+                  audio: base64Audio
+                }));
+              }
+            });
+          } catch(err: any) {
+            console.error("Audio processing initialized failed:", err);
+            setTranscript("麦克风初始化失败: " + err.message);
+            setIsMicOn(false);
+          }
+        };
+
+        let fullTranscript = "";
+        
+        ws.onmessage = (e) => {
+          const event = JSON.parse(e.data);
+          
+          switch (event.type) {
+            case 'input_audio_buffer.speech_started':
+              setSystemState("listening");
+              setEmotion("listening");
+              setTranscript("我正在听...");
+              if (player) player.clearAll();
+              break;
+            case 'input_audio_buffer.speech_stopped':
+              setSystemState("thinking");
+              setEmotion("thinking");
+              setTranscript("处理中...");
+              break;
+            case 'response.created':
+               setSystemState("thinking");
+               setEmotion("thinking");
+               if (player) player.clearAll();
+               fullTranscript = "";
+               break;
+            case 'response.audio_transcript.delta':
+            case 'response.text.delta':
+              if (event.delta) {
+                fullTranscript += event.delta;
+                setTranscript("回复: " + fullTranscript);
+              }
+              break;
+            case 'response.audio.delta': // playback
+              setSystemState("speaking");
+              let nextEmo: Emotion = 'neutral';
+              if (/(生|讨厌|坏|傻|笨|烦|滚|气|不理你|闭嘴)/.test(fullTranscript)) nextEmo = 'angry';
+              else if (/(哇|天哪|天呐|真的|居然|神奇|惊讶|怎么可能|太厉害)/.test(fullTranscript)) nextEmo = 'surprised';
+              else if (/(夸|爱我|美|帅|不好意思|害羞|喜欢你|么么哒)/.test(fullTranscript)) nextEmo = 'shy';
+              else if (/(好|开心|喜欢|棒|谢谢|哈哈|不错|赞|对|可以)/.test(fullTranscript)) nextEmo = 'happy';
+              else if (/(难过|悲伤|哎|哭|惨|可惜|不要)/.test(fullTranscript)) nextEmo = 'sad';
+              setEmotion(nextEmo);
+
+              if (player && event.delta) {
+                player.appendPCM(event.delta);
+              }
+              break;
+            case 'response.done':
+              setSystemState("idle");
+              setTimeout(() => { if (!isStopped) setEmotion("neutral") }, 3000);
+              break;
+            case 'error':
+              setSystemState("error");
+              console.error(event.message);
+              if (event.message.includes("API_KEY")) {
+                 setTranscript("请在设置中配置 STEPFUN_API_KEY 哦~");
+              } else {
+                 setTranscript("连接出错: " + event.message);
+              }
+              setIsMicOn(false);
+              break;
+          }
+        };
+      } catch(err: any) {
+        console.error(err);
+        setSystemState("error");
+        setTranscript("WebSocket 初始化失败: " + err.message);
+        setIsMicOn(false);
+      }
     };
 
-    connectStepFun();
-    startRecognition();
+    startAudioProcessing();
 
     return () => {
       isStopped = true;
-      clearTimeout(thinkingTimeout);
-      if (recognition) {
-        recognition.stop();
+      if (recorder) {
+        recorder.stop();
       }
       if (ws) {
         ws.close();
+        wsRef.current = null;
       }
       if (player) {
          player.clearAll();
@@ -777,7 +770,7 @@ export default function App() {
           <motion.div
             initial={{ opacity: 0, x: -10 }}
             animate={{ opacity: 1, x: 0 }}
-            className="bg-white/90 backdrop-blur-sm px-4 py-3 rounded-2xl shadow-lg border border-slate-200 max-w-md text-slate-700"
+            className="bg-black/60 backdrop-blur-md px-4 py-3 rounded-2xl shadow-lg border border-white/10 max-w-md text-white"
           >
             {transcript}
           </motion.div>

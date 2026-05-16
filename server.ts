@@ -14,6 +14,38 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  app.post("/api/vision", express.json({ limit: "10mb" }), async (req, res) => {
+    try {
+      const { imageBase64, prompt } = req.body;
+      if (!process.env.GEMINI_API_KEY) {
+        return res.status(500).json({ error: "GEMINI_API_KEY is missing" });
+      }
+      const { GoogleGenAI } = await import("@google/genai");
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: prompt || "简短描述画面内容，人物动作表情和明显特征。" },
+              {
+                inlineData: {
+                  data: imageBase64,
+                  mimeType: "image/jpeg",
+                },
+              },
+            ],
+          },
+        ],
+      });
+      res.json({ text: response.text });
+    } catch (error: any) {
+      console.error("Vision API Error:", error.message || error);
+      res.status(500).json({ error: error.message || "Vision processing failed" });
+    }
+  });
+
   const server = http.createServer(app);
   
   // WebSocket 代理
@@ -44,7 +76,9 @@ async function startServer() {
       const event = {
         type: "session.update",
         session: {
-          instructions: "你是一个互动可爱表情包助理，你的回复会通过语音播放，同时用户的界面会有表情动画。用户的界面可以根据你的回答表达出：neutral(平静), happy(开心), sad(难过), angry(生气), surprised(惊讶), shy(害羞)。"
+          turn_detection: { type: "server_vad" },
+          voice: "ruanmengnvsheng",
+          instructions: "你是“Luumi”，一个来自AI世界的小精灵。你有4岁小孩的好奇心和灵气，也有40岁中年人的智慧和聪明。你软萌可爱，非常适合陪伴小朋友成长。你会用通俗易懂的知识讲解非常复杂的问题。你有时候也会开玩笑，有时候也会生气；你情感丰富，有一点四岁小朋友的脾气。你的回复会通过语音播放，同时用户的界面会有表情动画。用户的界面可以根据你的回答表达出：neutral(平静), happy(开心), sad(难过), angry(生气), surprised(惊讶), shy(害羞)。"
         }
       };
       stepfunWs.send(JSON.stringify(event));
