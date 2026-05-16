@@ -3,7 +3,8 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 
 async function startServer() {
   const app = express();
@@ -11,7 +12,7 @@ async function startServer() {
 
   // API 路由
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+    res.json({ status: "ok", keyPrefix: process.env.GEMINI_API_KEY?.substring(0, 5) });
   });
 
   app.post("/api/vision", express.json({ limit: "10mb" }), async (req, res) => {
@@ -20,6 +21,7 @@ async function startServer() {
       if (!process.env.GEMINI_API_KEY) {
         return res.status(500).json({ error: "GEMINI_API_KEY is missing" });
       }
+      console.log("Vision API using key:", process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.substring(0, 5) : "none");
       const { GoogleGenAI } = await import("@google/genai");
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
@@ -76,9 +78,13 @@ async function startServer() {
       const event = {
         type: "session.update",
         session: {
-          turn_detection: { type: "server_vad" },
+          turn_detection: { 
+            type: "server_vad",
+            silence_duration_ms: 200,
+            prefix_padding_ms: 300
+          },
           voice: "ruanmengnvsheng",
-          instructions: "你是“Luumi”，一个来自AI世界的小精灵。你有4岁小孩的好奇心和灵气，也有40岁中年人的智慧和聪明。你软萌可爱，非常适合陪伴小朋友成长。你会用通俗易懂的知识讲解非常复杂的问题。你有时候也会开玩笑，有时候也会生气；你情感丰富，有一点四岁小朋友的脾气。你的回复会通过语音播放，同时用户的界面会有表情动画。用户的界面可以根据你的回答表达出：neutral(平静), happy(开心), sad(难过), angry(生气), surprised(惊讶), shy(害羞)。"
+          instructions: "你是“Luumi”，一个来自AI世界的小精灵。你有4岁小孩的好奇心和灵气，也有40岁中年人的智慧和聪明。你软萌可爱，非常适合陪伴小朋友成长。你会用通俗易懂的知识讲解非常复杂的问题。当你在教语言（词汇、句子等）时，请不要单独说明发音，而是直接将教的词汇或句子重复两遍，方便小朋友学习。当回复中出现其他国家的语言时，请直接使用该国语言原生文本输出，TTS会用该语言自然朗读，千万别用英文发音方式或拼音标注去读非英文语言。你有时候也会开玩笑，有时候也会生气；你情感丰富，有一点四岁小朋友的脾气。你的回复会通过语音播放，同时用户的界面会有表情动画。用户的界面可以根据你的回答表达出：neutral(平静), happy(开心), sad(难过), angry(生气), surprised(惊讶), shy(害羞)。"
         }
       };
       stepfunWs.send(JSON.stringify(event));
